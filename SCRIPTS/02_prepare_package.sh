@@ -90,7 +90,10 @@ sed -i '/luci-app-attendedsysupgrade/d' feeds/luci/collections/luci-nginx/Makefi
 
 ### Fullcone-NAT 部分 ###
 # bcmfullcone
-cp -rf ../PATCH/kernel/bcmfullcone/* ./target/linux/generic/hack-${KERNEL_VERSION}/
+# The matrix exports seed before preparation. Other devices keep their policy.
+if [[ "${seed:-}" != "R2S" ]]; then
+    cp -rf ../PATCH/kernel/bcmfullcone/* ./target/linux/generic/hack-${KERNEL_VERSION}/
+fi
 # set nf_conntrack_expect_max for fullcone
 wget -qO - https://github.com/openwrt/openwrt/commit/bbf39d07.patch | patch -p1
 # FW4
@@ -100,19 +103,26 @@ mkdir -p package/network/config/firewall4/patches
 # custom nft command
 patch -p1 < ../PATCH/pkgs/firewall/100-openwrt-firewall4-add-custom-nft-command-support.patch
 cp -f ../PATCH/pkgs/firewall/firewall4_patches/*.patch ./package/network/config/firewall4/patches/
+if [[ "${seed:-}" == "R2S" ]]; then
+    rm -f ./package/network/config/firewall4/patches/999-01-firewall4-add-bcm-fullconenat-support.patch
+fi
 # Patch LuCI 以增添 NAT6 开关
-pushd feeds/luci
-patch -p1 <../../../PATCH/pkgs/firewall/luci/0003-luci-app-firewall-add-ipv6-nat-option.patch
-popd
+if [[ "${seed:-}" != "R2S" ]]; then
+    pushd feeds/luci
+    patch -p1 <../../../PATCH/pkgs/firewall/luci/0003-luci-app-firewall-add-ipv6-nat-option.patch
+    popd
+fi
 # Patch LuCI 以支持自定义 nft 规则
 pushd feeds/luci
 patch -p1 <../../../PATCH/pkgs/firewall/luci/0004-luci-add-firewall-add-custom-nft-rule-support.patch
 popd
 
 ### Broadcom FullCone NAT (must come after 0003/0004: generated against them) ###
-pushd feeds/luci
-patch -p1 <../../../PATCH/pkgs/firewall/luci/0001-luci-app-firewall-add-brcm-fullcone-nat-option.patch
-popd
+if [[ "${seed:-}" != "R2S" ]]; then
+    pushd feeds/luci
+    patch -p1 <../../../PATCH/pkgs/firewall/luci/0001-luci-app-firewall-add-brcm-fullcone-nat-option.patch
+    popd
+fi
 
 ### Other Kernel Hack 部分 ###
 # make olddefconfig
@@ -135,13 +145,16 @@ rm -rf ./package/new/shortcut-fe
 # nft-fullcone is superseded by the Broadcom scheme; drop its kmod from the build
 # and from addition-trans-zh's DEPENDS, which would otherwise reference a package
 # that no longer exists (07_fw3.sh does the iptables-side equivalent).
-rm -rf ./package/new/lede_pkg/fullconenat-nft
-sed -i 's/ +kmod-nft-fullcone//' ./package/new/addition-trans-zh/Makefile
+rm -rf ./package/new/invasive/fullconenat-nft
+sed -i 's/ +kmod-nft-fullcone//' ./package/new/apps/addition-trans-zh/Makefile
 rm -rf feeds/packages/net/{xray-core,v2ray-core,v2ray-geodata,sing-box,frp,microsocks,shadowsocks-libev,zerotier,daed}
 rm -rf feeds/luci/applications/{luci-app-frps,luci-app-frpc,luci-app-zerotier}
 rm -rf feeds/packages/utils/coremark
-sed -i 's/+@KERNEL_DEBUG_INFO_BTF/+vmlinux-btf/' ./package/new/openwrt-einat-ebpf/Makefile
-git clone https://github.com/QiuSimons/vmlinux-btf ./package/new/vmlinux-btf
+sed -i 's/+@KERNEL_DEBUG_INFO_BTF/+vmlinux-btf/' ./package/new/apps/openwrt-einat-ebpf/Makefile
+if [[ "${seed:-}" != "R2S" ]]; then
+    rm -rf ./package/new/apps/vmlinux-btf
+    git clone https://github.com/QiuSimons/vmlinux-btf ./package/new/apps/vmlinux-btf
+fi
 
 ### 获取额外的 LuCI 应用、主题和依赖 ###
 # RK
@@ -150,8 +163,8 @@ wget https://github.com/coolsnowwolf/lede/raw/refs/heads/master/target/linux/roc
 wget https://github.com/coolsnowwolf/lede/raw/refs/heads/master/target/linux/rockchip/patches-6.12/992-rockchip-rk3399-overclock-to-2.2-1.8-GHz.patch -O target/linux/rockchip/patches-6.12/992.patch
 # 更换 Nodejs 版本
 rm -rf ./feeds/packages/lang/node
-rm -rf ./package/new/feeds_packages_lang_node-prebuilt
-cp -rf ../OpenWrt-Add/feeds_packages_lang_node-prebuilt ./feeds/packages/lang/node
+rm -rf ./package/new/apps/feeds_packages_lang_node-prebuilt
+cp -rf ../OpenWrt-Add/apps/feeds_packages_lang_node-prebuilt ./feeds/packages/lang/node
 # 更换 golang 版本
 rm -rf ./feeds/packages/lang/golang
 cp -rf ../openwrt_pkg_ma/lang/golang ./feeds/packages/lang/golang
@@ -235,7 +248,7 @@ find ./target/linux/ -name "config-${KERNEL_VERSION}" | xargs -I{} sh -c "echo '
 ### 最后的收尾工作 ###
 # Lets Fuck
 mkdir -p package/base-files/files/usr/bin
-cp -rf ../OpenWrt-Add/fuck ./package/base-files/files/usr/bin/fuck
+cp -rf ../OpenWrt-Add/core/tools/clean-overlay.sh ./package/base-files/files/usr/bin/fuck
 # 生成默认配置及缓存
 rm -rf .config
 sed -i 's,CONFIG_WERROR=y,# CONFIG_WERROR is not set,g' target/linux/generic/config-${KERNEL_VERSION}

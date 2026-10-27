@@ -25,7 +25,7 @@ REQUIRED = {
 
 def passwall2_dependencies():
     """Read the actual prepared recipe so new hard dependencies cannot be missed."""
-    recipe = Path("package/new/openwrt_helloworld/luci-app-passwall2/Makefile").read_text()
+    recipe = Path("package/new/legacy/openwrt_helloworld/luci-app-passwall2/Makefile").read_text()
     require("PKG_NAME:=luci-app-passwall2" in recipe.splitlines(), "unexpected Passwall2 recipe")
     recipe = recipe.replace("\\\n", " ")
     match = re.search(r"^LUCI_DEPENDS\s*:?=\s*(.*)$", recipe, re.M)
@@ -65,7 +65,12 @@ def main():
 
     withdrawn_patch = Path("target/linux/generic/backport-6.12/010-0020-net-tcp_bbr-add-lfn-loss-tolerance.patch")
     require(not withdrawn_patch.exists(), "withdrawn BBR LFN patch is present")
-    recipe = Path("package/new/openwrt_helloworld/xray-core/Makefile").read_text()
+    for withdrawn in (
+        "target/linux/generic/hack-6.12/982-add-bcm-fullconenat-support.patch",
+        "package/network/config/firewall4/patches/999-01-firewall4-add-bcm-fullconenat-support.patch",
+    ):
+        require(not Path(withdrawn).exists(), "withdrawn BCM FullCone patch is present: " + withdrawn)
+    recipe = Path("package/new/legacy/openwrt_helloworld/xray-core/Makefile").read_text()
     version = re.search(r"^PKG_VERSION:=(\d+\.\d+\.\d+)$", recipe, re.M)
     require(version, "unrecognized Xray package version")
     expected = version.group(1)

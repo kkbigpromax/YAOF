@@ -3,7 +3,7 @@
 # Run in the prepared OpenWrt source directory; never run on the router.
 set -euo pipefail
 
-recipe=package/new/openwrt_helloworld/xray-core/Makefile
+recipe=package/new/legacy/openwrt_helloworld/xray-core/Makefile
 test -f "$recipe" || { echo "Xray package path changed; review before building." >&2; exit 1; }
 
 workdir=$(mktemp -d)

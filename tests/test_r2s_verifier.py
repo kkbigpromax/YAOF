@@ -5,12 +5,16 @@ from QiuSimons/OpenWrt-Add at ec7092aa5437fe5608371f0723b54789f8fff0af.
 Run: python3 -m unittest discover -s tests -v
 """
 import gzip
+import hashlib
+import io
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -38,7 +42,7 @@ class R2SVerifierTests(unittest.TestCase):
         self.config += "CONFIG_PACKAGE_dnsmasq_full_nftset=y\n"
         for option in ("Basic_Core_Xray", "Nftables_Transparent_Proxy"):
             self.config += "CONFIG_PACKAGE_luci-app-passwall2_" + option + "=y\n"
-        recipe_dir = self.prepared / "package/new/openwrt_helloworld"
+        recipe_dir = self.prepared / "package/new/legacy/openwrt_helloworld"
         for package, fixture in (("luci-app-passwall2", "passwall2.Makefile"),
                                  ("xray-core", "xray.Makefile")):
             (recipe_dir / package).mkdir(parents=True)
@@ -74,7 +78,7 @@ class R2SVerifierTests(unittest.TestCase):
                         "luci-app-upnp", "miniupnpd-nftables", "wireguard-tools",
                         "kmod-wireguard", "vmlinux-btf", "kmod-backlight-pwm", "mosdns",
                         "luci-app-flowcone", "flowcone", "luci-app-passwall",
-                        "dns2socks", "microsocks", "ipt2socks"):
+                        "dns2socks", "microsocks", "ipt2socks", "nat6"):
             with self.subTest(package=package):
                 self.assert_rejected(self.run_gate(config=self.config + f"CONFIG_PACKAGE_{package}=y\n"),
                                      "disabled packages selected: " + package)
@@ -110,6 +114,110 @@ class R2SVerifierTests(unittest.TestCase):
                 config = self.config.replace(f"CONFIG_PACKAGE_{package}=y\n", "")
                 self.assert_rejected(self.run_gate(config=config), "missing selections: " + package)
 
+    def test_withdrawn_bcm_kernel_and_firewall_patches_cannot_return(self):
+        for name in (
+            "target/linux/generic/hack-6.12/982-add-bcm-fullconenat-support.patch",
+            "package/network/config/firewall4/patches/999-01-firewall4-add-bcm-fullconenat-support.patch",
+        ):
+            with self.subTest(patch=name):
+                patch = self.prepared / name
+                patch.parent.mkdir(parents=True, exist_ok=True)
+                patch.write_text("withdrawn patch\n")
+                self.assert_rejected(self.run_gate(), "withdrawn BCM FullCone patch is present")
+                patch.unlink()
+
+    def test_prune_new_feed_layout_preserves_passwall2_xray_and_dns(self):
+        unused = ("legacy/openwrt_helloworld/luci-app-passwall", "apps/homeproxy",
+                  "legacy/openwrt_helloworld/momo", "apps/OpenWrt-mihomo")
+        keep = ("legacy/openwrt_helloworld/luci-app-passwall2", "legacy/openwrt_helloworld/xray-core",
+                "legacy/openwrt_helloworld/chinadns-ng", "apps/addition-trans-zh")
+        for name in (*unused, *keep):
+            path = self.prepared / "package/new" / name
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "Makefile").touch()
+        result = subprocess.run(["bash", str(ROOT / "SCRIPTS/09_prune_r2s.sh")],
+                                cwd=self.prepared, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in unused:
+            self.assertFalse((self.prepared / "package/new" / name).exists(), name)
+        for name in keep:
+            self.assertTrue((self.prepared / "package/new" / name / "Makefile").exists(), name)
+
+    def test_xray_new_path_updates_to_latest_published_prerelease(self):
+        # Exercise the real updater with local HTTP fixtures, never network or
+        # a target binary. A newer draft must not win over a published prerelease.
+        releases = self.parent / "releases.json"
+        releases.write_text(json.dumps([
+            {"tag_name": "v26.10.21", "published_at": "2026-10-21T00:00:00Z", "draft": False, "prerelease": False},
+            {"tag_name": "v26.10.27", "published_at": "2026-10-27T00:00:00Z", "draft": False, "prerelease": True},
+            {"tag_name": "v26.10.28", "published_at": "2026-10-28T00:00:00Z", "draft": True, "prerelease": True},
+        ]))
+        archive = self.parent / "source.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            payload = b"public source fixture\n"
+            member = tarfile.TarInfo("Xray-core-fixture/README")
+            member.size = len(payload)
+            tar.addfile(member, io.BytesIO(payload))
+        bindir = self.parent / "bin"
+        bindir.mkdir()
+        curl = bindir / "curl"
+        curl.write_text('''#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) shift; output="$1" ;;
+        https://api.github.com/repos/XTLS/Xray-core/releases*) source="$TEST_RELEASES" ;;
+        https://codeload.github.com/XTLS/Xray-core/tar.gz/v26.10.27) source="$TEST_ARCHIVE" ;;
+    esac
+    shift
+done
+[ -n "$source" ] && [ -n "$output" ] && cp "$source" "$output"
+''')
+        curl.chmod(0o755)
+        env = {**os.environ, "PATH": str(bindir) + os.pathsep + os.environ["PATH"],
+               "TEST_RELEASES": str(releases), "TEST_ARCHIVE": str(archive)}
+        result = subprocess.run(["bash", str(ROOT / "SCRIPTS/09_update_xray.sh")],
+                                cwd=self.prepared, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        recipe = (self.prepared / "package/new/legacy/openwrt_helloworld/xray-core/Makefile").read_text()
+        self.assertIn("PKG_VERSION:=26.10.27\n", recipe)
+        self.assertIn("PKG_HASH:=" + hashlib.sha256(archive.read_bytes()).hexdigest(), recipe)
+        self.assertIn("Xray selected: v26.10.27", result.stdout)
+
+    def test_nat_preparation_excludes_r2s_extensions_only(self):
+        # Execute the NAT preparation section with real file copies and stubbed
+        # downloads/patching, checking both R2S and the unchanged other-device policy.
+        script = (ROOT / "SCRIPTS/02_prepare_package.sh").read_text()
+        section = script.split("### Fullcone-NAT 部分 ###\n", 1)[1].split("### Other Kernel Hack 部分 ###", 1)[0]
+        for relative in ("PATCH/pkgs/firewall", "PATCH/kernel/bcmfullcone"):
+            shutil.copytree(ROOT / relative, self.parent / relative)
+        kernel = self.prepared / "target/linux/generic/hack-6.12"
+        kernel.mkdir(parents=True)
+        (self.prepared / "feeds/luci").mkdir(parents=True)
+        bindir = self.parent / "nat-test-bin"
+        bindir.mkdir()
+        for name, text in (("wget", "#!/bin/sh\nexit 0\n"),
+                           ("patch", '#!/bin/sh\ncat >> "$TEST_PATCH_LOG"\n')):
+            command = bindir / name
+            command.write_text(text)
+            command.chmod(0o755)
+        log = self.parent / "patch-inputs.log"
+        env = {**os.environ, "PATH": str(bindir) + os.pathsep + os.environ["PATH"],
+               "KERNEL_VERSION": "6.12", "TEST_PATCH_LOG": str(log)}
+        for target in ("R2S", "R4S"):
+            result = subprocess.run(["bash", "-e", "-c", section], cwd=self.prepared,
+                                    env={**env, "seed": target}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            firewall = self.prepared / "package/network/config/firewall4/patches"
+            self.assertEqual((kernel / "982-add-bcm-fullconenat-support.patch").exists(), target != "R2S")
+            self.assertEqual((firewall / "999-01-firewall4-add-bcm-fullconenat-support.patch").exists(), target != "R2S")
+            for keep in ("001-fix-fw4-flow-offload.patch", "100-fw4-add-custom-nft-command-support.patch"):
+                self.assertTrue((firewall / keep).exists(), keep)
+            applied = log.read_text()
+            self.assertEqual("Subject: [PATCH 3/7] luci-app-firewall: add ipv6 nat option" in applied, target != "R2S")
+            self.assertEqual("Subject: [PATCH] luci-app-firewall: add BRCM full cone NAT option" in applied, target != "R2S")
+            self.assertIn("Subject: [PATCH 4/7] luci-add-firewall: add custom nft rule support", applied)
+            log.unlink()
+
     def test_prepared_recipe_new_hard_dependency_is_protected(self):
         self.recipe.write_text(self.recipe.read_text().replace("LUCI_DEPENDS:=", "LUCI_DEPENDS:=+new-helper "))
         self.assert_rejected(self.run_gate(), "missing selections: new-helper")
@@ -137,7 +245,7 @@ class R2SVerifierTests(unittest.TestCase):
     def test_removed_components_cannot_reappear_in_image(self):
         for package in ("sing-box", "haproxy", "miniupnpd-nftables", "kmod-wireguard", "vmlinux-btf",
                         "luci-app-flowcone", "flowcone", "luci-app-passwall",
-                        "dns2socks", "microsocks", "ipt2socks"):
+                        "dns2socks", "microsocks", "ipt2socks", "nat6"):
             with self.subTest(package=package):
                 self.assert_rejected(self.run_gate("image", packages={**self.packages, package: "test"}),
                                      "contains disabled packages: " + package)
