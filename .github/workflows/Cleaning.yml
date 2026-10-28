@@ -4,22 +4,27 @@ on:
   schedule:
     - cron: 1 1 * * 1
   workflow_dispatch:
+    inputs:
+      firmware_only:
+        description: "Only prune old R2S firmware assets"
+        type: boolean
+        default: true
 
 jobs:
   
   Cleanup-Old-Releases:
     runs-on: ubuntu-24.04
-    steps:  
-    - name: Delete Older Releases
-      uses: dev-drprasad/delete-older-releases@master
-      with:
-        keep_latest: 20
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep latest two R2S firmware versions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 SCRIPTS/11_retain_r2s_releases.py --apply
 
   Cleanup-Old-Artifacts:
+    if: github.event_name != 'workflow_dispatch' || !inputs.firmware_only
     runs-on: ubuntu-24.04
     steps:
     - name: Cleanup Old Action Artifacts
@@ -30,6 +35,7 @@ jobs:
       continue-on-error: true
         
   Cleanup-Workflow-Logs:
+    if: github.event_name != 'workflow_dispatch' || !inputs.firmware_only
     runs-on: ubuntu-24.04
     steps:
       - name: Cleanup Workflow Logs

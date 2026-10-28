@@ -346,6 +346,13 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           artifacts: ./artifact/*.zip
 
+      - name: Keep latest two R2S firmware versions
+        if: matrix.name == 'R2S' && steps.create_release.outcome == 'success'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 SCRIPTS/11_retain_r2s_releases.py --apply
+
       - name: Print Disk Space After
         run: df -h
 
