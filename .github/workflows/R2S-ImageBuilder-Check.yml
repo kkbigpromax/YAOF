@@ -1,6 +1,11 @@
 name: R2S ImageBuilder compatibility
 on:
   workflow_dispatch:
+  push:
+    branches: [25.12]
+    paths:
+      - .github/workflows/R2S-ImageBuilder-Check.yml
+      - SCRIPTS/check_r2s_imagebuilder.sh
 permissions:
   contents: read
 jobs:
