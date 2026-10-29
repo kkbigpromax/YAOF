@@ -4,6 +4,8 @@ import argparse
 from datetime import datetime, timezone, timedelta
 import hashlib
 import json
+import gzip
+import lzma
 import os
 from pathlib import Path
 import re
@@ -133,6 +135,93 @@ def configure_layout(ib):
     config.write_text(text)
 
 
+def fdt_nodes(data):
+    header = struct.unpack_from('>10I', data)
+    require(header[0] == 0xd00dfeed and header[1] <= len(data), 'Invalid FIT/DTB header')
+    pos, strings, size = header[2], header[3], header[9]
+    endpos = pos + size
+    nodes, stack = {}, []
+    while pos < endpos:
+        token = struct.unpack_from('>I', data, pos)[0]
+        pos += 4
+        if token == 1:
+            end = data.index(b'\0', pos)
+            stack.append(data[pos:end].decode())
+            pos = (end + 4) & ~3
+            nodes['/'.join(stack)] = {}
+        elif token == 2:
+            stack.pop()
+        elif token == 3:
+            length, name = struct.unpack_from('>II', data, pos)
+            pos += 8
+            end = data.index(b'\0', strings + name)
+            nodes['/'.join(stack)][data[strings + name:end].decode()] = data[pos:pos + length]
+            pos = (pos + length + 3) & ~3
+        elif token == 4:
+            pass
+        elif token == 9:
+            break
+        else:
+            raise RuntimeError('Invalid FDT token')
+    return nodes
+
+
+def verify_fit(data, kernel_version):
+    nodes = fdt_nodes(data)
+    kernel_seen, dtb_seen = False, False
+    result = {}
+    for path, props in nodes.items():
+        if 'data' not in props:
+            continue
+        payload = props['data']
+        hashes = {}
+        for child, values in nodes.items():
+            if child.startswith(path + '/hash'):
+                algo = values['algo'].rstrip(b'\0').decode()
+                digest = struct.pack('>I', zlib.crc32(payload)) if algo == 'crc32' else hashlib.new(algo, payload).digest()
+                require(digest == values['value'], 'FIT hash mismatch: ' + path)
+                hashes[algo] = digest.hex()
+        require(hashes, 'Missing FIT image hash: ' + path)
+        kind = props.get('type', b'').rstrip(b'\0')
+        entry = {'sha256': hashlib.sha256(payload).hexdigest(), 'hashes': hashes}
+        if kind == b'kernel':
+            require(props['arch'].rstrip(b'\0') == b'arm64', 'Wrong kernel architecture')
+            compression = props.get('compression', b'none').rstrip(b'\0')
+            kernel = lzma.decompress(payload) if compression in (b'lzma', b'xz') else gzip.decompress(payload) if compression == b'gzip' else payload
+            require(kernel[56:60] == b'ARM\x64', 'Invalid ARM64 kernel header')
+            require(('Linux version ' + kernel_version).encode() in kernel, 'Kernel version mismatch')
+            kernel_seen = True
+        elif kind == b'flat_dt':
+            compatible = fdt_nodes(payload)['']['compatible'].rstrip(b'\0').decode().split('\0')
+            require('friendlyarm,nanopi-r2s' in compatible, 'Wrong device tree')
+            entry['compatible'] = compatible
+            dtb_seen = True
+        result[path] = entry
+    require(kernel_seen and dtb_seen, 'Missing kernel or R2S device tree')
+    return result
+
+
+def verify_boot(raw, work, kernel_version):
+    partition = work / 'boot-partition.img'
+    with raw.open('rb') as src, partition.open('wb') as dst:
+        src.seek(65536 * 512)
+        dst.write(src.read(65536 * 512))
+    kernel, script = work / 'boot-kernel.img', work / 'boot.scr'
+    run(['debugfs', '-R', 'dump /kernel.img ' + str(kernel), partition])
+    run(['debugfs', '-R', 'dump /boot.scr ' + str(script), partition])
+    result = verify_fit(kernel.read_bytes(), kernel_version)
+    data = script.read_bytes()
+    require(data[:4] == bytes.fromhex('27051956'), 'Invalid boot script image')
+    header = bytearray(data[:64])
+    crc = struct.unpack_from('>I', header, 4)[0]
+    header[4:8] = bytes(4)
+    require(zlib.crc32(header) == crc, 'Boot script header CRC mismatch')
+    size = struct.unpack_from('>I', data, 12)[0]
+    require(zlib.crc32(data[64:64 + size]) == struct.unpack_from('>I', data, 24)[0], 'Boot script data CRC mismatch')
+    require(b'kernel.img' in data and b'bootm' in data, 'Unexpected boot command')
+    return {'fit': result, 'kernel_img_sha256': sha(kernel), 'boot_script_crc': 'passed'}
+
+
 def assemble(build):
     require(sys.platform.startswith('linux'), 'ImageBuilder requires a Linux runner; do not execute target binaries on Mac')
     work = ROOT / 'imagebuilder-r2s'
@@ -236,6 +325,8 @@ def assemble(build):
     with (ib / 'repositories').open('a') as f:
         f.write('\n' + repo + '\n')
     provenance['custom_feed_key_sha256'] = sha(key)
+    if (work / 'overlay').exists():
+        shutil.rmtree(work / 'overlay')
     overlay = work / 'overlay/etc/apk/keys'
     overlay.mkdir(parents=True, exist_ok=True)
     shutil.copy2(public, overlay / public.name)
@@ -245,6 +336,12 @@ def assemble(build):
     init.parent.mkdir(exist_ok=True)
     init.write_text("#!/bin/sh\nuci -q get luci.main.lang >/dev/null || { uci set luci.main.lang='zh_cn'; uci commit luci; }\nexit 0\n")
     init.chmod(0o755)
+    # Offline rc.common can encounter absolute target paths in publisher scripts.
+    # Preserve the standard service links explicitly without starting the service.
+    rc = work / 'overlay/etc/rc.d'
+    rc.mkdir(exist_ok=True)
+    (rc / 'S99passwall2').symlink_to('../init.d/passwall2')
+    (rc / 'K15passwall2').symlink_to('../init.d/passwall2')
     tokens = [line.strip() for line in (ROOT / 'profiles/packages.r2s').read_text().splitlines() if line.strip() and not line.startswith('#')]
     packages_arg = ' '.join(tokens)
     manifest_text = run(['make', '-C', ib, 'manifest', 'PROFILE=' + POLICY['profile'], 'PACKAGES=' + packages_arg], capture=True)
@@ -270,10 +367,13 @@ def assemble(build):
             shutil.copy2(target / name, evidence / name)
     shutil.copy2(manifests[0], evidence / manifests[0].name)
     artifact = ROOT / 'artifact'
+    if artifact.exists():
+        shutil.rmtree(artifact)
     artifact.mkdir(exist_ok=True)
     date = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
     checksums = []
     images = []
+    boot = None
     for fs, suffix in [('ext4', 'ext4'), ('squashfs', 'sfs')]:
         candidates = list(target.glob('*nanopi-r2s-' + fs + '-sysupgrade.img.gz'))
         require(len(candidates) == 1, 'Missing or ambiguous ' + fs + ' image')
@@ -286,9 +386,14 @@ def assemble(build):
             metadata = json.loads(meta.read_text())
             require('friendlyarm,nanopi-r2s' in metadata.get('supported_devices', []), 'Wrong upgrade device metadata')
         parts = check_layout(raw, fs)
+        checked_boot = verify_boot(raw, work, installed['kernel'].split('~')[0])
+        if boot is not None:
+            require(checked_boot == boot, 'ext4 and squashfs boot contents differ')
+        boot = checked_boot
         if fs == 'squashfs':
             rootfs = work / 'audit-rootfs'
-            run(['unsquashfs', '-no-progress', '-processors', '2', '-offset', str(parts[1]['start'] * 512), '-d', rootfs, raw])
+            # Device nodes such as /dev/console require root even for a static extraction.
+            run(['sudo', 'unsquashfs', '-no-progress', '-processors', '2', '-offset', str(parts[1]['start'] * 512), '-d', rootfs, raw])
             require(sha(rootfs / 'usr/bin/xray') == sha(binary), 'Xray in filesystem differs from authenticated release')
             db = (rootfs / 'lib/apk/db/installed').read_text()
             actual = {}
@@ -299,7 +404,7 @@ def assemble(build):
             require(actual == installed, 'Actual APK database differs from manifest')
             for driver in ('r8152.ko', 'nft_tproxy.ko', 'nft_socket.ko'):
                 require(list((rootfs / 'lib/modules').rglob(driver)), 'Driver absent from rootfs: ' + driver)
-            for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'sbin/sysupgrade'):
+            for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'etc/rc.d/S99passwall2', 'lib/functions/network.sh', 'sbin/sysupgrade'):
                 require((rootfs / path).exists() or (rootfs / path).is_symlink(), 'Critical file absent: ' + path)
             dns_version = run(['timeout', '30', 'qemu-aarch64-static', '-L', rootfs, rootfs / 'usr/sbin/dnsmasq', '--version'], capture=True)
             require('nftset' in dns_version.split() and 'no-nftset' not in dns_version.split(), 'DNSmasq lacks nftset support')
@@ -335,14 +440,16 @@ def assemble(build):
     (artifact / f'R2S-GC404-{date}-{version}.sha256sum').write_text(''.join(checksums))
     report = {'commit': os.environ.get('GITHUB_SHA'), 'openwrt': version, 'expected_xray': xv,
               'kernel_policy': provenance['kernel_policy'], 'packages': installed, 'required': required,
-              'disabled_count': len(POLICY['disabled']), 'images': images,
+              'disabled_count': len(POLICY['disabled']), 'images': images, 'boot': boot,
               'checks': ['Official ImageBuilder checksum', 'Authenticated third-party APKs', 'APK dependency resolution',
                          'Required and disabled package gates', 'Xray latest release and ARM64 version',
                          'Installed manifest versus solved manifest', 'ZIP and gzip CRC', 'MBR and retained partition layout',
                          'Squashfs all-file extraction', 'Actual APK database', 'Network driver files', 'Lua syntax',
-                         'DNSmasq nftset support', 'Xray China GeoIP/GeoSite configuration test under QEMU'],
+                         'DNSmasq nftset support', 'Xray China GeoIP/GeoSite configuration test under QEMU',
+                         'FIT kernel and R2S DTB hashes', 'Boot script CRC', 'Passwall2 startup links'],
               'hardware_validation': 'not performed'}
     (evidence / 'r2s-verification.json').write_text(json.dumps(report, indent=2) + '\n')
+    print('R2S_VERIFICATION_JSON=' + json.dumps(report, separators=(',', ':')), flush=True)
     print('R2S official-kernel candidate verified:', len(installed), 'packages;', len(required), 'protected;', xv, flush=True)
 
 

@@ -5,6 +5,7 @@ import struct
 import tempfile
 import unittest
 import zlib
+from unittest.mock import patch
 
 ROOT = Path(__file__).parents[1]
 spec = importlib.util.spec_from_file_location('imagebuilder', ROOT / 'SCRIPTS/build_r2s_imagebuilder.py')
@@ -44,6 +45,32 @@ class ImageBuilderTests(unittest.TestCase):
 
     def test_manifest_parsing_ignores_build_output(self):
         self.assertEqual(ib.parse_manifest('make: downloading packages\nxray-core - 26.10.29-r1\n'), {'xray-core': '26.10.29-r1'})
+
+    def test_missing_or_bad_release_digest_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            asset = {'name': 'test.apk', 'size': 4, 'browser_download_url': 'https://example.org/test.apk'}
+            with self.assertRaisesRegex(RuntimeError, 'digest'):
+                ib.fetch_asset({'assets': [asset]}, 'test.apk', Path(d))
+            asset['digest'] = 'sha256:' + '0' * 64
+            with patch.object(ib, 'get', side_effect=lambda url, dest: Path(dest).write_bytes(b'bad!')):
+                with self.assertRaisesRegex(RuntimeError, 'mismatch'):
+                    ib.fetch_asset({'assets': [asset]}, 'test.apk', Path(d))
+
+    def test_partition_change_blocks_retained_config_upgrade(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'test.img'
+            with path.open('wb') as f:
+                f.truncate(962592768)
+                mbr = bytearray(512);mbr[510:] = b'\x55\xaa'
+                for index, start, count in ((0,65536,65536),(1,196608,1683456)):
+                    mbr[446 + index * 16 + 4] = 131
+                    struct.pack_into('<II',mbr,446 + index * 16 + 8,start,count)
+                f.seek(0);f.write(mbr);f.seek(196608 * 512);f.write(b'hsqs')
+            ib.check_layout(path, 'squashfs')
+            with path.open('r+b') as f:
+                f.seek(446 + 16 + 8);f.write(struct.pack('<I',131072))
+            with self.assertRaisesRegex(RuntimeError, 'layout differs'):
+                ib.check_layout(path, 'squashfs')
 
     def test_gzip_crc_and_openwrt_metadata_are_distinguished(self):
         with tempfile.TemporaryDirectory() as d:
