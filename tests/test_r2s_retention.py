@@ -49,6 +49,18 @@ class RetentionTests(unittest.TestCase):
         result = retention.plan([a, b, draft])
         self.assertEqual({x["id"] for x in result["delete"]}, {100, 101})
 
+    def test_same_day_builds_keep_latest_two_build_ids(self):
+        data = release([])
+        for run in (101, 102, 103):
+            for fs in ('ext4', 'sfs'):
+                data['assets'].append({'id': run * 10 + len(data['assets']),
+                                       'name': f'R2S-GC404-2026-10-30-25.12.6-run{run}-1-{fs}.zip',
+                                       'created_at': f'2026-10-30T12:00:{run-100:02d}Z',
+                                       'state': 'uploaded', 'size': 20_000_000})
+        result = retention.plan([data])
+        self.assertEqual(len(result['keep']), 4)
+        self.assertTrue(all('run101-' in a['name'] for a in result['delete']))
+
 
 if __name__ == "__main__":
     unittest.main()

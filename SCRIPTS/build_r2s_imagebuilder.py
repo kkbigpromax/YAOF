@@ -371,6 +371,9 @@ def assemble(build):
         shutil.rmtree(artifact)
     artifact.mkdir(exist_ok=True)
     date = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+    build_id = os.environ.get('GITHUB_RUN_ID', 'local') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+    require(re.fullmatch(r'(?:\d+|local)-\d+', build_id), 'Invalid build identifier')
+    prefix = f'R2S-GC404-{date}-{version}-run{build_id}'
     checksums = []
     images = []
     boot = None
@@ -429,7 +432,7 @@ def assemble(build):
             # Syntax only: no target application or router service is started.
             for path in (rootfs / 'usr/share/passwall2').rglob('*.lua'):
                 run(['luac5.1', '-p', path])
-        zipname = f'R2S-GC404-{date}-{version}-{suffix}.zip'
+        zipname = prefix + '-' + suffix + '.zip'
         with zipfile.ZipFile(artifact / zipname, 'w', zipfile.ZIP_DEFLATED) as z:
             z.write(image, image.name)
         digest = sha(image)
@@ -437,7 +440,7 @@ def assemble(build):
         images.append({'image': image.name, 'zip': zipname, 'sha256': digest, 'zip_sha256': sha(artifact / zipname),
                        'image_bytes': raw.stat().st_size, 'raw_sha256': sha(raw), 'partitions': parts,
                        'gzip_crc': 'passed', 'fwtool_trailer_bytes': len(tail)})
-    (artifact / f'R2S-GC404-{date}-{version}.sha256sum').write_text(''.join(checksums))
+    (artifact / (prefix + '.sha256sum')).write_text(''.join(checksums))
     report = {'commit': os.environ.get('GITHUB_SHA'), 'openwrt': version, 'expected_xray': xv,
               'kernel_policy': provenance['kernel_policy'], 'packages': installed, 'required': required,
               'disabled_count': len(POLICY['disabled']), 'images': images, 'boot': boot,
