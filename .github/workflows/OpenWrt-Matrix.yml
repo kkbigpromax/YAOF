@@ -58,15 +58,31 @@ jobs:
           inputs_targets=$(echo "$inputs_targets" | sed 's/，/,/g' | tr 'a-z' 'A-Z' | xargs)
 
           if [[ -z "$inputs_targets" ]]; then
-            # If input is empty, run all targets
-            echo "matrix=$(echo "$all_targets" | jq -c '{include: .}')" >> $GITHUB_OUTPUT
+            selected="$all_targets"
           else
             # Filter targets based on input
             filtered_targets=$(echo "$all_targets" | jq --arg targets "$inputs_targets" '[.[] | select(.name as $name | ($targets | split(",") | map(gsub(" "; "")) | index($name))) ]')
-            echo "matrix=$(echo "$filtered_targets" | jq -c '{include: .}')" >> $GITHUB_OUTPUT
+            selected="$filtered_targets"
           fi
+          # R2S always uses official ImageBuilder, including mixed matrix runs.
+          echo "r2s=$(echo "$selected" | jq 'any(.[]; .name == "R2S")')" >> "$GITHUB_OUTPUT"
+          legacy=$(echo "$selected" | jq '[.[] | select(.name != "R2S")]')
+          echo "has_legacy=$(echo "$legacy" | jq 'length > 0')" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(echo "$legacy" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      r2s: ${{ steps.set-matrix.outputs.r2s }}
+      has_legacy: ${{ steps.set-matrix.outputs.has_legacy }}
+
+  build-r2s:
+    needs: setup
+    if: needs.setup.outputs.r2s == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/R2S-ImageBuilder.yml
+    with:
+      build_firmware: ${{ inputs.build_firmware }}
+      upload_source: ${{ inputs.upload_source }}
 
   build:
     needs: setup
@@ -82,7 +98,7 @@ jobs:
       latest_release: dummy
 
     runs-on: ubuntu-24.04
-    if: github.event.repository.owner.id == github.event.sender.id
+    if: needs.setup.outputs.has_legacy == 'true' && github.event.repository.owner.id == github.event.sender.id
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -245,7 +261,7 @@ jobs:
       # upload_source
       - name: Upload Source Archive
         if: inputs.upload_source
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.openwrt_source_name }}
           path: |
@@ -319,7 +335,7 @@ jobs:
 
       - name: Save R2S firmware and build information
         if: inputs.build_firmware && matrix.name == 'R2S'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: R2S-firmware-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

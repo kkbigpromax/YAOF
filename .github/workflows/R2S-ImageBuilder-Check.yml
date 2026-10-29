@@ -5,26 +5,18 @@ on:
     branches: [25.12]
     paths:
       - .github/workflows/R2S-ImageBuilder-Check.yml
+      - .github/workflows/R2S-ImageBuilder.yml
       - SCRIPTS/check_r2s_imagebuilder.sh
+      - SCRIPTS/build_r2s_imagebuilder.py
+      - SCRIPTS/verify_r2s_delivery.py
+      - profiles/**
 permissions:
-  contents: read
+  # Reusable workflow also declares a conditional publisher; publish=false here.
+  # Its running build job explicitly reduces its token to contents:read.
+  contents: write
 jobs:
   check:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install tools
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zstd unzip make gawk rsync libncurses-dev
-      - name: Resolve official R2S and Passwall2 dependencies
-        run: bash SCRIPTS/check_r2s_imagebuilder.sh
-      - name: Keep compatibility evidence
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: R2S-ImageBuilder-compatibility-${{ github.run_id }}
-          path: |
-            imagebuilder-check/*.json
-            imagebuilder-check/*.txt
-            imagebuilder-check/*.log
-          retention-days: 7
+    uses: ./.github/workflows/R2S-ImageBuilder.yml
+    with:
+      build_firmware: true
+      publish: false

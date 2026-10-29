@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       upload_source:
-        description: "Upload source folder before build"
+        description: "Save the official ImageBuilder archive with this build"
         required: false
         type: boolean
         default: false
@@ -27,10 +27,9 @@ jobs:
   build:
     permissions:
       contents: write
-    uses: ./.github/workflows/OpenWrt-Matrix.yml
+    uses: ./.github/workflows/R2S-ImageBuilder.yml
     if: github.event.repository.owner.id == github.event.sender.id && inputs.badge_status == ''
     with:
-      targets: "R2S"
       upload_source: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_source }}
       build_firmware: ${{ (github.event_name == 'workflow_dispatch' && inputs.build_firmware) || github.event_name != 'workflow_dispatch' }}
 

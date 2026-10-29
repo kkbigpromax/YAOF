@@ -1,0 +1,91 @@
+name: R2S official ImageBuilder
+on:
+  workflow_call:
+    inputs:
+      build_firmware:
+        type: boolean
+        default: true
+      upload_source:
+        type: boolean
+        default: false
+      publish:
+        type: boolean
+        default: true
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check regression tests
+        run: python3 -B -m unittest discover -s tests -v
+      - name: Install ImageBuilder and audit tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential zstd unzip gawk rsync libncurses-dev zlib1g-dev libssl-dev file openssl squashfs-tools e2fsprogs qemu-user-static lua5.1
+      - name: Read pinned OpenWrt version
+        id: version
+        run: |
+          echo "version=$(python3 -c 'import json; print(json.load(open("profiles/r2s-policy.json"))["openwrt"])')" >> "$GITHUB_OUTPUT"
+      - name: Assemble and verify official-kernel R2S
+        run: python3 -u SCRIPTS/build_r2s_imagebuilder.py ${{ inputs.build_firmware && '--build' || '' }}
+      - name: Save R2S firmware and build information
+        if: inputs.build_firmware
+        uses: actions/upload-artifact@v6
+        with:
+          name: R2S-firmware-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifact/*.zip
+            artifact/*.sha256sum
+            imagebuilder-r2s/evidence/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Save resolution evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: R2S-ImageBuilder-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: imagebuilder-r2s/evidence/*
+          retention-days: 7
+      - name: Save requested ImageBuilder archive
+        if: inputs.upload_source
+        uses: actions/upload-artifact@v6
+        with:
+          name: R2S-ImageBuilder-archive-${{ github.run_id }}
+          path: imagebuilder-r2s/downloads/openwrt-imagebuilder-*.tar.zst
+          retention-days: 5
+  publish:
+    if: inputs.publish && inputs.build_firmware
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v6
+        with:
+          name: R2S-firmware-${{ github.run_id }}-${{ github.run_attempt }}
+          path: delivery
+      - name: Recheck delivery
+        run: python3 SCRIPTS/verify_r2s_delivery.py delivery "${{ github.sha }}"
+      - name: Create release
+        uses: ncipollo/release-action@v1
+        with:
+          name: OpenWRT-${{ needs.build.outputs.version }}
+          tag: ${{ needs.build.outputs.version }}
+          commit: ${{ github.sha }}
+          allowUpdates: true
+          replacesArtifacts: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: delivery/artifact/*.zip
+          body: "NanoPi R2S: official OpenWrt kernel, slim Passwall2 + Xray. Build and file checks passed; hardware/network acceptance is pending."
+      - name: Keep latest two R2S firmware versions
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 SCRIPTS/11_retain_r2s_releases.py --apply
