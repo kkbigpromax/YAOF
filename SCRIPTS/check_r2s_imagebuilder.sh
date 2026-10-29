@@ -37,7 +37,7 @@ find unpacked -type f -name '*.apk' -exec cp -t "$IB_DIR/packages" {} +
 cp ./luci-app-passwall2-*.apk ./luci-i18n-passwall2-zh-cn-*.apk "$IB_DIR/packages/"
 APK="$IB_DIR/staging_dir/host/bin/apk"
 "$APK" --version
-"$APK" --help
+"$APK" --help || true
 "$APK" adbdump --help || true
 "$APK" mkpkg --help || true
 echo 'ImageBuilder repositories:'
