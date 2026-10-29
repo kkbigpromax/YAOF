@@ -33,6 +33,9 @@ jobs:
           echo "version=$(python3 -c 'import json; print(json.load(open("profiles/r2s-policy.json"))["openwrt"])')" >> "$GITHUB_OUTPUT"
       - name: Assemble and verify official-kernel R2S
         run: python3 -u SCRIPTS/build_r2s_imagebuilder.py ${{ inputs.build_firmware && '--build' || '' }}
+      - name: Recheck candidate ZIPs and source commit
+        if: inputs.build_firmware
+        run: python3 SCRIPTS/verify_r2s_delivery.py . "${{ github.sha }}"
       - name: Save R2S firmware and build information
         if: inputs.build_firmware
         uses: actions/upload-artifact@v6
