@@ -182,6 +182,7 @@ def assemble(build):
         shutil.copy2(path, ib / 'packages' / path.name)
     app = next((ib / 'packages').glob('luci-app-passwall2-*.apk'))
     info = package_info(apk, app)
+    require(info['name'] == 'luci-app-passwall2', 'Unexpected proxy package')
     hard_deps = []
     for dep in info['depends']:
         require(isinstance(dep, str) and re.fullmatch(r'[A-Za-z0-9_.+-]+', dep), 'Passwall2 dependency syntax changed: ' + str(dep))
@@ -196,7 +197,11 @@ def assemble(build):
     for package in (ib / 'packages').glob('*.apk'):
         meta = package_info(apk, package)
         if meta['name'] in wanted | {'luci-app-passwall2', 'luci-i18n-passwall2-zh-cn'}:
-            run([apk, 'adbsign', '--reset-signatures', '--sign-key', private, package])
+            # Publisher APKs were already authenticated by the Release SHA256.
+            # Only this signature conversion accepts their unavailable original key;
+            # the resulting signature and ImageBuilder package checks remain strict.
+            run([apk, 'adbsign', '--allow-untrusted', '--reset-signatures', '--sign-key', private, package])
+            require(package_info(apk, package) == meta, 'APK metadata changed while signing')
             run([apk, '--keys-dir', ib / 'keys', 'verify', package])
     # Package the newest upstream ARM64 binary without rebuilding or patching the kernel.
     xrelease = latest_xray(json.loads(get(API + 'XTLS/Xray-core/releases?per_page=100')))
@@ -296,6 +301,26 @@ def assemble(build):
                 require(list((rootfs / 'lib/modules').rglob(driver)), 'Driver absent from rootfs: ' + driver)
             for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'sbin/sysupgrade'):
                 require((rootfs / path).exists() or (rootfs / path).is_symlink(), 'Critical file absent: ' + path)
+            dns_version = run(['timeout', '30', 'qemu-aarch64-static', '-L', rootfs, rootfs / 'usr/sbin/dnsmasq', '--version'], capture=True)
+            require('nftset' in dns_version.split() and 'no-nftset' not in dns_version.split(), 'DNSmasq lacks nftset support')
+            (evidence / 'dnsmasq-version.txt').write_text(dns_version)
+            assets = rootfs / 'usr/share/v2ray'
+            for name in ('geoip.dat', 'geosite.dat'):
+                require((assets / name).is_file(), 'Geo data missing: ' + name)
+            config = work / 'xray-geo-test.json'
+            config.write_text(json.dumps({'log': {'loglevel': 'none'}, 'outbounds': [{'protocol': 'freedom', 'tag': 'direct'}],
+                                         'routing': {'rules': [{'type': 'field', 'ip': ['geoip:cn'], 'outboundTag': 'direct'},
+                                                               {'type': 'field', 'domain': ['geosite:cn'], 'outboundTag': 'direct'}]}}))
+            previous_assets = os.environ.get('XRAY_LOCATION_ASSET')
+            os.environ['XRAY_LOCATION_ASSET'] = str(assets)
+            try:
+                test_result = run(['timeout', '30', 'qemu-aarch64-static', rootfs / 'usr/bin/xray', 'run', '-test', '-config', config], capture=True)
+                (evidence / 'xray-geo-test.txt').write_text(test_result)
+            finally:
+                if previous_assets is None:
+                    os.environ.pop('XRAY_LOCATION_ASSET', None)
+                else:
+                    os.environ['XRAY_LOCATION_ASSET'] = previous_assets
             # Syntax only: no target application or router service is started.
             for path in (rootfs / 'usr/share/passwall2').rglob('*.lua'):
                 run(['luac5.1', '-p', path])
@@ -314,7 +339,8 @@ def assemble(build):
               'checks': ['Official ImageBuilder checksum', 'Authenticated third-party APKs', 'APK dependency resolution',
                          'Required and disabled package gates', 'Xray latest release and ARM64 version',
                          'Installed manifest versus solved manifest', 'ZIP and gzip CRC', 'MBR and retained partition layout',
-                         'Squashfs all-file extraction', 'Actual APK database', 'Network driver files', 'Lua syntax'],
+                         'Squashfs all-file extraction', 'Actual APK database', 'Network driver files', 'Lua syntax',
+                         'DNSmasq nftset support', 'Xray China GeoIP/GeoSite configuration test under QEMU'],
               'hardware_validation': 'not performed'}
     (evidence / 'r2s-verification.json').write_text(json.dumps(report, indent=2) + '\n')
     print('R2S official-kernel candidate verified:', len(installed), 'packages;', len(required), 'protected;', xv, flush=True)
