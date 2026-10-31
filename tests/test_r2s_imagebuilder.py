@@ -1,7 +1,9 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import struct
+import subprocess
 import tempfile
 import unittest
 import zlib
@@ -14,6 +16,51 @@ spec.loader.exec_module(ib)
 
 
 class ImageBuilderTests(unittest.TestCase):
+    def prepare_autocore_fixture(self, root):
+        script = root / 'etc/init.d/autocore'
+        script.parent.mkdir(parents=True)
+        shutil.copy2(ROOT / 'profiles/r2s-overlay/etc/init.d/autocore', script)
+        for name in ('rpcd_10_system.js', 'rpcd_29_ports.js', 'rpcd_luci', 'ucode_sys'):
+            (root / 'etc' / name).write_text('getCPUInfo: {}\n')
+        setup = root / 'etc/uci-defaults/090-autocore'
+        setup.parent.mkdir(parents=True)
+        setup.write_text('#!/bin/sh\n')
+        return script
+
+    def test_autocore_retains_display_with_no_network_commands(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            script = self.prepare_autocore_fixture(root)
+            self.assertEqual(ib.verify_autocore_display_only(root)['mode'], 'display-only')
+            # Tripwires fail if a future edit silently reintroduces tuning calls.
+            guard = 'sysctl() { exit 91; }; uci() { exit 92; }; ethtool() { exit 93; }; ubus() { exit 94; }; '
+            result = subprocess.run(['/bin/sh', '-c', guard + '. "$1"; start', 'sh', str(script)])
+            self.assertEqual(result.returncode, 0)
+
+    def test_autocore_network_tuning_cannot_return_in_image(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            script = self.prepare_autocore_fixture(root)
+            script.write_text(script.read_text() + '\nsysctl -w net.ipv4.conf.br-lan.proxy_arp=1\n')
+            with self.assertRaisesRegex(RuntimeError, 'network tuning returned'):
+                ib.verify_autocore_display_only(root)
+
+    def test_autocore_missing_display_extension_stops_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.prepare_autocore_fixture(root)
+            (root / 'etc/rpcd_luci').unlink()
+            with self.assertRaisesRegex(RuntimeError, 'display extension missing'):
+                ib.verify_autocore_display_only(root)
+
+    def test_autocore_nonexecutable_service_stops_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            script = self.prepare_autocore_fixture(root)
+            script.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, 'not executable'):
+                ib.verify_autocore_display_only(root)
+
     def test_latest_includes_prereleases_excludes_drafts(self):
         data = [{'tag_name': 'v26.10.21', 'published_at': '2026-10-21', 'draft': False},
                 {'tag_name': 'v26.10.29', 'published_at': '2026-10-29', 'draft': False, 'prerelease': True},

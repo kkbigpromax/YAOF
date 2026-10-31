@@ -1,0 +1,9 @@
+#!/bin/sh /etc/rc.common
+
+# R2S keeps autocore's display extensions, without its network tuning.
+# Preserve existing network configuration and official driver defaults.
+START=99
+
+start() {
+	return 0
+}

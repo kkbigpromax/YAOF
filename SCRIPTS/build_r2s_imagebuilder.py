@@ -92,6 +92,34 @@ def verify_packages(packages, hard_deps, xray_version):
     return sorted(required)
 
 
+def verify_autocore_display_only(rootfs):
+    expected = ROOT / 'profiles/r2s-overlay/etc/init.d/autocore'
+    service = rootfs / 'etc/init.d/autocore'
+    require(service.is_file() and not service.is_symlink() and sha(service) == sha(expected),
+            'autocore network tuning returned or display-only service is missing')
+    require(service.stat().st_mode & 0o111, 'autocore display-only service is not executable')
+    # The package stages these display extensions for its first-boot defaults.
+    # Some package revisions may already have installed them at their final paths.
+    display_paths = [
+        ('etc/rpcd_10_system.js', 'www/luci-static/resources/view/status/include/10_system.js'),
+        ('etc/rpcd_29_ports.js', 'www/luci-static/resources/view/status/include/29_ports.js'),
+        ('etc/rpcd_luci', 'usr/share/rpcd/ucode/luci'),
+        ('etc/ucode_sys', 'usr/share/ucode/luci/sys.uc'),
+    ]
+    present = []
+    for staged, active in display_paths:
+        path = staged if (rootfs / staged).is_file() else active
+        require((rootfs / path).is_file(), 'autocore display extension missing: ' + staged)
+        present.append(path)
+    rpc = rootfs / present[2]
+    require('getCPUInfo:' in rpc.read_text(), 'autocore CPU display RPC is missing')
+    require((rootfs / 'etc/uci-defaults/090-autocore').is_file(),
+            'autocore first-boot display setup is missing')
+    return {'mode': 'display-only', 'network_tuning': 'disabled',
+            'init_sha256': sha(service), 'display_files': present,
+            'preserves_existing_network_config': True}
+
+
 def inflate(image, raw):
     """Check gzip CRC, retaining legitimate OpenWrt fwtool metadata outside gzip."""
     decoder = zlib.decompressobj(31)
@@ -331,6 +359,8 @@ def assemble(build):
     overlay.mkdir(parents=True, exist_ok=True)
     shutil.copy2(public, overlay / public.name)
     shutil.copy2(key, overlay / key.name)
+    # Overlay only the tuning service; keep the package's display defaults/RPCs.
+    shutil.copytree(ROOT / 'profiles/r2s-overlay', work / 'overlay', dirs_exist_ok=True)
     # Keep language choice on upgrades; initialize only a missing option.
     init = work / 'overlay/etc/uci-defaults/90-r2s-language'
     init.parent.mkdir(exist_ok=True)
@@ -377,6 +407,7 @@ def assemble(build):
     checksums = []
     images = []
     boot = None
+    autocore = None
     for fs, suffix in [('ext4', 'ext4'), ('squashfs', 'sfs')]:
         candidates = list(target.glob('*nanopi-r2s-' + fs + '-sysupgrade.img.gz'))
         require(len(candidates) == 1, 'Missing or ambiguous ' + fs + ' image')
@@ -405,6 +436,7 @@ def assemble(build):
                 if 'P' in d:
                     actual[d['P']] = d['V']
             require(actual == installed, 'Actual APK database differs from manifest')
+            autocore = verify_autocore_display_only(rootfs)
             for driver in ('r8152.ko', 'nft_tproxy.ko', 'nft_socket.ko'):
                 require(list((rootfs / 'lib/modules').rglob(driver)), 'Driver absent from rootfs: ' + driver)
             for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'etc/rc.d/S99passwall2', 'lib/functions/network.sh', 'sbin/sysupgrade'):
@@ -444,12 +476,14 @@ def assemble(build):
     report = {'commit': os.environ.get('GITHUB_SHA'), 'openwrt': version, 'expected_xray': xv,
               'kernel_policy': provenance['kernel_policy'], 'packages': installed, 'required': required,
               'disabled_count': len(POLICY['disabled']), 'images': images, 'boot': boot,
+              'autocore': autocore,
               'checks': ['Official ImageBuilder checksum', 'Authenticated third-party APKs', 'APK dependency resolution',
                          'Required and disabled package gates', 'Xray latest release and ARM64 version',
                          'Installed manifest versus solved manifest', 'ZIP and gzip CRC', 'MBR and retained partition layout',
                          'Squashfs all-file extraction', 'Actual APK database', 'Network driver files', 'Lua syntax',
                          'DNSmasq nftset support', 'Xray China GeoIP/GeoSite configuration test under QEMU',
-                         'FIT kernel and R2S DTB hashes', 'Boot script CRC', 'Passwall2 startup links'],
+                         'FIT kernel and R2S DTB hashes', 'Boot script CRC', 'Passwall2 startup links',
+                         'autocore display retained without network tuning'],
               'hardware_validation': 'not performed'}
     (evidence / 'r2s-verification.json').write_text(json.dumps(report, indent=2) + '\n')
     print('R2S_VERIFICATION_JSON=' + json.dumps(report, separators=(',', ':')), flush=True)
