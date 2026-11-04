@@ -1,0 +1,12 @@
+#!/bin/sh
+# Register Vantage and migrate the previous R2S theme on retained upgrades.
+uci -q set luci.themes.Vantage=/luci-static/vantage || exit 1
+case "$(uci -q get luci.main.mediaurlbase)" in
+	''|/luci-static/aurora|/luci-static/bootstrap)
+		uci -q set luci.main.mediaurlbase=/luci-static/vantage || exit 1
+		;;
+esac
+if [ "$(uci -q get luci.themes.Aurora)" = /luci-static/aurora ]; then
+	uci -q delete luci.themes.Aurora || exit 1
+fi
+uci -q commit luci

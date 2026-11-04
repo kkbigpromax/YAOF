@@ -120,6 +120,27 @@ def verify_autocore_display_only(rootfs):
             'preserves_existing_network_config': True}
 
 
+def verify_vantage_ui(rootfs):
+    defaults_path = 'etc/uci-defaults/30_luci-theme-vantage'
+    defaults = rootfs / defaults_path
+    expected = ROOT / 'profiles/r2s-overlay' / defaults_path
+    require(defaults.is_file() and sha(defaults) == sha(expected) and defaults.stat().st_mode & 0o111,
+            'Vantage first-boot theme migration is missing or changed')
+    paths = [
+        'usr/share/ucode/luci/template/themes/vantage/header.ut',
+        'www/luci-static/vantage/vantage.css',
+        'www/luci-static/resources/view/vantage/overview.js',
+        'usr/share/rpcd/acl.d/luci-app-vantage.json',
+    ]
+    for path in paths:
+        require((rootfs / path).is_file(), 'Vantage UI file missing: ' + path)
+    menu = rootfs / 'usr/share/luci/menu.d/zz-luci-app-vantage.json'
+    landing = json.loads(menu.read_text()).get('admin/dashboard', {})
+    require(landing.get('action') == {'type': 'view', 'path': 'vantage/overview'},
+            'Vantage dashboard landing page is missing')
+    return {'theme': 'vantage', 'dashboard': landing['action']['path'], 'defaults_sha256': sha(defaults)}
+
+
 def inflate(image, raw):
     """Check gzip CRC, retaining legitimate OpenWrt fwtool metadata outside gzip."""
     decoder = zlib.decompressobj(31)
@@ -359,7 +380,7 @@ def assemble(build):
     overlay.mkdir(parents=True, exist_ok=True)
     shutil.copy2(public, overlay / public.name)
     shutil.copy2(key, overlay / key.name)
-    # Overlay only the tuning service; keep the package's display defaults/RPCs.
+    # Keep autocore display/RPCs and migrate the LuCI theme on first boot.
     shutil.copytree(ROOT / 'profiles/r2s-overlay', work / 'overlay', dirs_exist_ok=True)
     # Keep language choice on upgrades; initialize only a missing option.
     init = work / 'overlay/etc/uci-defaults/90-r2s-language'
@@ -408,6 +429,7 @@ def assemble(build):
     images = []
     boot = None
     autocore = None
+    vantage = None
     for fs, suffix in [('ext4', 'ext4'), ('squashfs', 'sfs')]:
         candidates = list(target.glob('*nanopi-r2s-' + fs + '-sysupgrade.img.gz'))
         require(len(candidates) == 1, 'Missing or ambiguous ' + fs + ' image')
@@ -437,6 +459,7 @@ def assemble(build):
                     actual[d['P']] = d['V']
             require(actual == installed, 'Actual APK database differs from manifest')
             autocore = verify_autocore_display_only(rootfs)
+            vantage = verify_vantage_ui(rootfs)
             for driver in ('r8152.ko', 'nft_tproxy.ko', 'nft_socket.ko'):
                 require(list((rootfs / 'lib/modules').rglob(driver)), 'Driver absent from rootfs: ' + driver)
             for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'etc/rc.d/S99passwall2', 'lib/functions/network.sh', 'sbin/sysupgrade'):
@@ -476,14 +499,14 @@ def assemble(build):
     report = {'commit': os.environ.get('GITHUB_SHA'), 'openwrt': version, 'expected_xray': xv,
               'kernel_policy': provenance['kernel_policy'], 'packages': installed, 'required': required,
               'disabled_count': len(POLICY['disabled']), 'images': images, 'boot': boot,
-              'autocore': autocore,
+              'autocore': autocore, 'vantage': vantage,
               'checks': ['Official ImageBuilder checksum', 'Authenticated third-party APKs', 'APK dependency resolution',
                          'Required and disabled package gates', 'Xray latest release and ARM64 version',
                          'Installed manifest versus solved manifest', 'ZIP and gzip CRC', 'MBR and retained partition layout',
                          'Squashfs all-file extraction', 'Actual APK database', 'Network driver files', 'Lua syntax',
                          'DNSmasq nftset support', 'Xray China GeoIP/GeoSite configuration test under QEMU',
                          'FIT kernel and R2S DTB hashes', 'Boot script CRC', 'Passwall2 startup links',
-                         'autocore display retained without network tuning'],
+                         'autocore display retained without network tuning', 'Vantage theme and dashboard files'],
               'hardware_validation': 'not performed'}
     (evidence / 'r2s-verification.json').write_text(json.dumps(report, indent=2) + '\n')
     print('R2S_VERIFICATION_JSON=' + json.dumps(report, separators=(',', ':')), flush=True)

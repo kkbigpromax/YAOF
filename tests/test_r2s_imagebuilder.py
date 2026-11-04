@@ -16,6 +16,34 @@ spec.loader.exec_module(ib)
 
 
 class ImageBuilderTests(unittest.TestCase):
+    def test_vantage_migrates_aurora_and_bootstrap_but_keeps_other_themes(self):
+        script = ROOT / 'profiles/r2s-overlay/etc/uci-defaults/30_luci-theme-vantage'
+        uci = """
+uci() {
+    shift
+    case "$1:$2" in
+        get:luci.main.mediaurlbase) printf '%s' "$media";;
+        get:luci.themes.Aurora) printf '%s' "$aurora";;
+        set:luci.main.mediaurlbase=*) media=${2#*=};;
+        set:luci.themes.Vantage=/luci-static/vantage) registered=1;;
+        delete:luci.themes.Aurora) aurora=;;
+        commit:luci) printf '%s|%s|%s' "$media" "$registered" "$aurora";;
+        *) return 99;;
+    esac
+}
+media=$2
+aurora=$3
+. "$1"
+"""
+        for previous in ('', '/luci-static/aurora', '/luci-static/bootstrap',
+                         '/luci-static/vantage', '/luci-static/other'):
+            with self.subTest(previous=previous):
+                result = subprocess.check_output(
+                    ['/bin/sh', '-c', uci, 'sh', str(script), previous, '/luci-static/aurora'],
+                    text=True)
+                expected = previous if previous.endswith('/other') else '/luci-static/vantage'
+                self.assertEqual(result, expected + '|1|')
+
     def prepare_autocore_fixture(self, root):
         script = root / 'etc/init.d/autocore'
         script.parent.mkdir(parents=True)
