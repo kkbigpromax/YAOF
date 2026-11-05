@@ -1,6 +1,8 @@
 name: R2S-OpenWrt
 
 on:
+  push:
+    branches: [r2s-release-20261106]
 #  schedule:
 #    - cron: 5 6 * * 0
   workflow_dispatch:
@@ -30,6 +32,7 @@ jobs:
     uses: ./.github/workflows/R2S-ImageBuilder.yml
     if: github.event.repository.owner.id == github.event.sender.id && inputs.badge_status == ''
     with:
+      publish: true
       upload_source: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_source }}
       build_firmware: ${{ (github.event_name == 'workflow_dispatch' && inputs.build_firmware) || github.event_name != 'workflow_dispatch' }}
 
