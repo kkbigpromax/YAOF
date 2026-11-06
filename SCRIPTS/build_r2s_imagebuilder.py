@@ -51,9 +51,10 @@ def run(args, cwd=None, capture=False):
     return result.stdout if capture else None
 
 
-def latest_xray(releases):
-    candidates = [r for r in releases if not r['draft'] and r.get('published_at') and re.fullmatch(r'v\d+\.\d+\.\d+', r['tag_name'])]
-    require(candidates, 'No published Xray release')
+def latest_release(releases, tag_pattern, name):
+    candidates = [r for r in releases if not r['draft'] and r.get('published_at')
+                  and re.fullmatch(tag_pattern, r['tag_name'])]
+    require(candidates, 'No published ' + name + ' release')
     return max(candidates, key=lambda r: r['published_at'])
 
 
@@ -82,13 +83,16 @@ def parse_manifest(text):
     return dict(re.findall(r'^([A-Za-z0-9_.+-]+) - ([^\s]+)$', text, re.M))
 
 
-def verify_packages(packages, hard_deps, xray_version):
+def verify_packages(packages, hard_deps, xray_version, passwall2_version):
     required = set(POLICY['required']) | set(hard_deps)
     missing = required - packages.keys()
     banned = set(POLICY['disabled']) & packages.keys()
     require(not missing, 'Missing protected packages: ' + ', '.join(sorted(missing)))
     require(not banned, 'Disabled packages returned: ' + ', '.join(sorted(banned)))
     require(packages['xray-core'].startswith(xray_version + '-'), 'Xray package is stale')
+    require(packages['luci-app-passwall2'] == passwall2_version, 'Passwall2 package is stale')
+    themes = {name for name in packages if name.startswith('luci-theme-')}
+    require(themes == {'luci-theme-aurora'}, 'Unexpected LuCI themes: ' + ', '.join(sorted(themes)))
     return sorted(required)
 
 
@@ -120,25 +124,21 @@ def verify_autocore_display_only(rootfs):
             'preserves_existing_network_config': True}
 
 
-def verify_vantage_ui(rootfs):
-    defaults_path = 'etc/uci-defaults/30_luci-theme-vantage'
+def verify_aurora_ui(rootfs):
+    defaults_path = 'etc/uci-defaults/30_luci-theme-aurora'
     defaults = rootfs / defaults_path
     expected = ROOT / 'profiles/r2s-overlay' / defaults_path
     require(defaults.is_file() and sha(defaults) == sha(expected) and defaults.stat().st_mode & 0o111,
-            'Vantage first-boot theme migration is missing or changed')
+            'Aurora first-boot theme migration is missing or changed')
     paths = [
-        'usr/share/ucode/luci/template/themes/vantage/header.ut',
-        'www/luci-static/vantage/vantage.css',
-        'www/luci-static/resources/view/vantage/overview.js',
-        'usr/share/rpcd/acl.d/luci-app-vantage.json',
+        'usr/share/ucode/luci/template/themes/aurora/header.ut',
+        'usr/share/ucode/luci/template/themes/aurora/sysauth.ut',
+        'www/luci-static/aurora/main.css',
+        'www/luci-static/resources/view/dashboard/index.js',
     ]
     for path in paths:
-        require((rootfs / path).is_file(), 'Vantage UI file missing: ' + path)
-    menu = rootfs / 'usr/share/luci/menu.d/zz-luci-app-vantage.json'
-    landing = json.loads(menu.read_text()).get('admin/dashboard', {})
-    require(landing.get('action') == {'type': 'view', 'path': 'vantage/overview'},
-            'Vantage dashboard landing page is missing')
-    return {'theme': 'vantage', 'dashboard': landing['action']['path'], 'defaults_sha256': sha(defaults)}
+        require((rootfs / path).is_file(), 'Aurora UI file missing: ' + path)
+    return {'theme': 'aurora', 'defaults_sha256': sha(defaults)}
 
 
 def inflate(image, raw):
@@ -301,9 +301,15 @@ def assemble(build):
     configure_layout(ib)
     provenance = {'official_imagebuilder': {'url': base + '/' + name, 'sha256': hashes[name]},
                   'kernel_policy': 'Official precompiled kernel and modules; no YAOF kernel/firewall patches applied',
-                  'commit': os.environ.get('GITHUB_SHA'), 'passwall2_release': POLICY['passwall2_release']}
+                  'commit': os.environ.get('GITHUB_SHA')}
     # All imported user-space packages are authenticated by GitHub Release digests.
-    release = json.loads(get(API + 'Openwrt-Passwall/openwrt-passwall2/releases/tags/' + POLICY['passwall2_release']))
+    releases = json.loads(get(API + 'Openwrt-Passwall/openwrt-passwall2/releases?per_page=100'))
+    release = latest_release(releases, r'\d+\.\d+\.\d+-\d+', 'Passwall2')
+    passwall2_tag = release['tag_name']
+    version_number, revision = passwall2_tag.rsplit('-', 1)
+    passwall2_version = f'{version_number}-r{revision}'
+    provenance['passwall2_release'] = passwall2_tag
+    print('Passwall2 selected:', passwall2_tag, 'prerelease:', release['prerelease'], flush=True)
     bundle = fetch_asset(release, 'packages_apk_aarch64_generic.zip', downloads)
     wanted = {'chinadns-ng', 'geoview', 'tcping', 'v2ray-geoip', 'v2ray-geosite'}
     with zipfile.ZipFile(bundle) as z:
@@ -321,6 +327,7 @@ def assemble(build):
     app = next((ib / 'packages').glob('luci-app-passwall2-*.apk'))
     info = package_info(apk, app)
     require(info['name'] == 'luci-app-passwall2', 'Unexpected proxy package')
+    require(info['version'] == passwall2_version, 'Passwall2 APK version does not match the selected release')
     hard_deps = []
     for dep in info['depends']:
         require(isinstance(dep, str) and re.fullmatch(r'[A-Za-z0-9_.+-]+', dep), 'Passwall2 dependency syntax changed: ' + str(dep))
@@ -342,7 +349,8 @@ def assemble(build):
             require(package_info(apk, package) == meta, 'APK metadata changed while signing')
             run([apk, '--keys-dir', ib / 'keys', 'verify', package])
     # Package the newest upstream ARM64 binary without rebuilding or patching the kernel.
-    xrelease = latest_xray(json.loads(get(API + 'XTLS/Xray-core/releases?per_page=100')))
+    xrelease = latest_release(json.loads(get(API + 'XTLS/Xray-core/releases?per_page=100')),
+                              r'v\d+\.\d+\.\d+', 'Xray')
     xv = xrelease['tag_name'][1:]
     xb = fetch_asset(xrelease, 'Xray-linux-arm64-v8a.zip', downloads)
     xr = work / 'xray-root/usr/bin'
@@ -399,7 +407,7 @@ def assemble(build):
     print(manifest_text, flush=True)
     (evidence / 'resolved-manifest.log').write_text(manifest_text)
     resolved = parse_manifest(manifest_text)
-    required = verify_packages(resolved, hard_deps, xv)
+    required = verify_packages(resolved, hard_deps, xv, passwall2_version)
     provenance['resolved_packages'] = resolved
     (evidence / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
     if not build:
@@ -411,7 +419,7 @@ def assemble(build):
     manifests = list(target.glob('*nanopi-r2s*.manifest'))
     require(len(manifests) == 1, 'Expected one R2S manifest')
     installed = parse_manifest(manifests[0].read_text())
-    verify_packages(installed, hard_deps, xv)
+    verify_packages(installed, hard_deps, xv, passwall2_version)
     require(installed == resolved, 'Installed image manifest differs from resolved package set')
     for name in ('config.buildinfo', 'feeds.buildinfo', 'version.buildinfo'):
         if (target / name).exists():
@@ -429,7 +437,7 @@ def assemble(build):
     images = []
     boot = None
     autocore = None
-    vantage = None
+    aurora = None
     for fs, suffix in [('ext4', 'ext4'), ('squashfs', 'sfs')]:
         candidates = list(target.glob('*nanopi-r2s-' + fs + '-sysupgrade.img.gz'))
         require(len(candidates) == 1, 'Missing or ambiguous ' + fs + ' image')
@@ -459,7 +467,7 @@ def assemble(build):
                     actual[d['P']] = d['V']
             require(actual == installed, 'Actual APK database differs from manifest')
             autocore = verify_autocore_display_only(rootfs)
-            vantage = verify_vantage_ui(rootfs)
+            aurora = verify_aurora_ui(rootfs)
             for driver in ('r8152.ko', 'nft_tproxy.ko', 'nft_socket.ko'):
                 require(list((rootfs / 'lib/modules').rglob(driver)), 'Driver absent from rootfs: ' + driver)
             for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'etc/rc.d/S99passwall2', 'lib/functions/network.sh', 'sbin/sysupgrade'):
@@ -497,16 +505,18 @@ def assemble(build):
                        'gzip_crc': 'passed', 'fwtool_trailer_bytes': len(tail)})
     (artifact / (prefix + '.sha256sum')).write_text(''.join(checksums))
     report = {'commit': os.environ.get('GITHUB_SHA'), 'openwrt': version, 'expected_xray': xv,
+              'passwall2_release': passwall2_tag,
               'kernel_policy': provenance['kernel_policy'], 'packages': installed, 'required': required,
               'disabled_count': len(POLICY['disabled']), 'images': images, 'boot': boot,
-              'autocore': autocore, 'vantage': vantage,
+              'autocore': autocore, 'aurora': aurora,
               'checks': ['Official ImageBuilder checksum', 'Authenticated third-party APKs', 'APK dependency resolution',
-                         'Required and disabled package gates', 'Xray latest release and ARM64 version',
+                         'Required and disabled package gates', 'Latest Passwall2 release and installed version',
+                         'Xray latest release and ARM64 version',
                          'Installed manifest versus solved manifest', 'ZIP and gzip CRC', 'MBR and retained partition layout',
                          'Squashfs all-file extraction', 'Actual APK database', 'Network driver files', 'Lua syntax',
                          'DNSmasq nftset support', 'Xray China GeoIP/GeoSite configuration test under QEMU',
                          'FIT kernel and R2S DTB hashes', 'Boot script CRC', 'Passwall2 startup links',
-                         'autocore display retained without network tuning', 'Vantage theme and dashboard files'],
+                         'autocore display retained without network tuning', 'Aurora theme and dashboard files'],
               'hardware_validation': 'not performed'}
     (evidence / 'r2s-verification.json').write_text(json.dumps(report, indent=2) + '\n')
     print('R2S_VERIFICATION_JSON=' + json.dumps(report, separators=(',', ':')), flush=True)

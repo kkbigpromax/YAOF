@@ -12,8 +12,17 @@ report = json.loads(reports[0].read_text())
 assert report['commit'] == sys.argv[2], 'Artifact belongs to another source commit'
 autocore = report.get('autocore', {})
 assert autocore.get('mode') == 'display-only' and autocore.get('network_tuning') == 'disabled'
-stub = Path(__file__).resolve().parents[1] / 'profiles/r2s-overlay/etc/init.d/autocore'
+overlay = Path(__file__).resolve().parents[1] / 'profiles/r2s-overlay'
+stub = overlay / 'etc/init.d/autocore'
 assert autocore.get('init_sha256') == hashlib.sha256(stub.read_bytes()).hexdigest(), 'Wrong autocore service in image'
+aurora = report['aurora']
+defaults = overlay / 'etc/uci-defaults/30_luci-theme-aurora'
+assert aurora['theme'] == 'aurora'
+assert aurora['defaults_sha256'] == hashlib.sha256(defaults.read_bytes()).hexdigest(), 'Wrong Aurora migration in image'
+packages = report['packages']
+assert {name for name in packages if name.startswith('luci-theme-')} == {'luci-theme-aurora'}
+version, revision = report['passwall2_release'].rsplit('-', 1)
+assert packages['luci-app-passwall2'] == f'{version}-r{revision}', 'Wrong Passwall2 version in image'
 assert len(report['images']) == 2
 assert {x['image'].split('-r2s-')[1].split('-')[0] for x in report['images']} == {'ext4', 'squashfs'}
 for image in report['images']:

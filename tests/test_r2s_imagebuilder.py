@@ -16,33 +16,31 @@ spec.loader.exec_module(ib)
 
 
 class ImageBuilderTests(unittest.TestCase):
-    def test_vantage_migrates_aurora_and_bootstrap_but_keeps_other_themes(self):
-        script = ROOT / 'profiles/r2s-overlay/etc/uci-defaults/30_luci-theme-vantage'
+    def test_aurora_replaces_retained_vantage_and_bootstrap(self):
+        script = ROOT / 'profiles/r2s-overlay/etc/uci-defaults/30_luci-theme-aurora'
         uci = """
 uci() {
     shift
     case "$1:$2" in
-        get:luci.main.mediaurlbase) printf '%s' "$media";;
-        get:luci.themes.Aurora) printf '%s' "$aurora";;
         set:luci.main.mediaurlbase=*) media=${2#*=};;
-        set:luci.themes.Vantage=/luci-static/vantage) registered=1;;
-        delete:luci.themes.Aurora) aurora=;;
-        commit:luci) printf '%s|%s|%s' "$media" "$registered" "$aurora";;
+        set:luci.themes.Aurora=/luci-static/aurora) registered=1;;
+        delete:luci.themes.Vantage) vantage=;;
+        delete:luci.themes.Bootstrap) bootstrap=;;
+        commit:luci) printf '%s|%s|%s|%s' "$media" "$registered" "$vantage" "$bootstrap";;
         *) return 99;;
     esac
 }
 media=$2
-aurora=$3
+vantage=/luci-static/vantage
+bootstrap=/luci-static/bootstrap
 . "$1"
 """
-        for previous in ('', '/luci-static/aurora', '/luci-static/bootstrap',
-                         '/luci-static/vantage', '/luci-static/other'):
+        for previous in ('', '/luci-static/aurora', '/luci-static/bootstrap', '/luci-static/vantage'):
             with self.subTest(previous=previous):
                 result = subprocess.check_output(
-                    ['/bin/sh', '-c', uci, 'sh', str(script), previous, '/luci-static/aurora'],
+                    ['/bin/sh', '-c', uci, 'sh', str(script), previous],
                     text=True)
-                expected = previous if previous.endswith('/other') else '/luci-static/vantage'
-                self.assertEqual(result, expected + '|1|')
+                self.assertEqual(result, '/luci-static/aurora|1||')
 
     def prepare_autocore_fixture(self, root):
         script = root / 'etc/init.d/autocore'
@@ -93,30 +91,44 @@ aurora=$3
         data = [{'tag_name': 'v26.10.21', 'published_at': '2026-10-21', 'draft': False},
                 {'tag_name': 'v26.10.29', 'published_at': '2026-10-29', 'draft': False, 'prerelease': True},
                 {'tag_name': 'v26.11.01', 'published_at': '2026-11-01', 'draft': True}]
-        self.assertEqual(ib.latest_xray(data)['tag_name'], 'v26.10.29')
+        self.assertEqual(ib.latest_release(data, r'v\d+\.\d+\.\d+', 'Xray')['tag_name'], 'v26.10.29')
+
+    def test_passwall2_uses_latest_published_date(self):
+        data = [{'tag_name': '26.10.20-1', 'published_at': '2026-10-20', 'draft': False},
+                {'tag_name': '26.11.3-1', 'published_at': '2026-11-03', 'draft': False},
+                {'tag_name': '26.11.4-1', 'published_at': None, 'draft': True}]
+        self.assertEqual(ib.latest_release(data, r'\d+\.\d+\.\d+-\d+', 'Passwall2')['tag_name'], '26.11.3-1')
 
     def test_actual_apk_hard_dependency_is_required(self):
         packages = {k: '1-r1' for k in ib.POLICY['required']}
         packages['xray-core'] = '26.10.29-r1'
         with self.assertRaisesRegex(RuntimeError, 'new-hard-dependency'):
-            ib.verify_packages(packages, ['new-hard-dependency'], '26.10.29')
+            ib.verify_packages(packages, ['new-hard-dependency'], '26.10.29', '1-r1')
 
     def test_all_protected_packages_and_all_forbidden_packages(self):
         base = {k: '1-r1' for k in ib.POLICY['required']}
         base['xray-core'] = '26.10.29-r1'
-        ib.verify_packages(base, [], '26.10.29')
+        ib.verify_packages(base, [], '26.10.29', '1-r1')
         for name in ib.POLICY['required']:
             with self.subTest(required=name), self.assertRaises(RuntimeError):
-                ib.verify_packages({k: v for k, v in base.items() if k != name}, [], '26.10.29')
+                ib.verify_packages({k: v for k, v in base.items() if k != name}, [], '26.10.29', '1-r1')
         for name in ib.POLICY['disabled']:
             with self.subTest(disabled=name), self.assertRaises(RuntimeError):
-                ib.verify_packages({**base, name: '1-r1'}, [], '26.10.29')
+                ib.verify_packages({**base, name: '1-r1'}, [], '26.10.29', '1-r1')
 
     def test_stale_xray_cannot_pass(self):
         packages = {k: '1-r1' for k in ib.POLICY['required']}
         packages['xray-core'] = '26.10.21-r1'
         with self.assertRaisesRegex(RuntimeError, 'stale'):
-            ib.verify_packages(packages, [], '26.10.29')
+            ib.verify_packages(packages, [], '26.10.29', '1-r1')
+
+    def test_feed_cannot_replace_selected_passwall2_or_add_themes(self):
+        packages = {k: '1-r1' for k in ib.POLICY['required']}
+        packages['xray-core'] = '26.10.29-r1'
+        with self.assertRaisesRegex(RuntimeError, 'Passwall2 package is stale'):
+            ib.verify_packages(packages, [], '26.10.29', '26.11.3-r1')
+        with self.assertRaisesRegex(RuntimeError, 'Unexpected LuCI themes'):
+            ib.verify_packages({**packages, 'luci-theme-extra': '1-r1'}, [], '26.10.29', '1-r1')
 
     def test_manifest_parsing_ignores_build_output(self):
         self.assertEqual(ib.parse_manifest('make: downloading packages\nxray-core - 26.10.29-r1\n'), {'xray-core': '26.10.29-r1'})

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Select Aurora when a retained configuration points to an excluded theme.
+uci -q set luci.themes.Aurora=/luci-static/aurora || exit 1
+uci -q set luci.main.mediaurlbase=/luci-static/aurora || exit 1
+uci -q delete luci.themes.Vantage || true
+uci -q delete luci.themes.Bootstrap || true
+uci -q commit luci
