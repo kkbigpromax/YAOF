@@ -544,8 +544,11 @@ def assemble(build):
             tuning = verify_no_custom_tuning(rootfs)
             aurora = verify_aurora_ui(rootfs)
             for source in ('etc/rpcd_luci', 'etc/ucode_sys'):
+                # luci.sys exports functions and must compile as a library;
+                # rpcd's luci entry point is a regular program returning methods.
+                mode = '-cmodule' if source == 'etc/ucode_sys' else '-c'
                 run(['timeout', '30', 'qemu-aarch64-static', '-L', rootfs, rootfs / 'usr/bin/ucode',
-                     '-c', '-o', work / (Path(source).name + '.ucb'), rootfs / source])
+                     mode, '-o', work / (Path(source).name + '.ucb'), rootfs / source])
             for driver in ('r8152.ko', 'nft_tproxy.ko', 'nft_socket.ko'):
                 require(list((rootfs / 'lib/modules').rglob(driver)), 'Driver absent from rootfs: ' + driver)
             for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'etc/rc.d/S99passwall2', 'lib/functions/network.sh', 'sbin/sysupgrade'):
