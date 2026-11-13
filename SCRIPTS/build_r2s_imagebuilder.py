@@ -472,8 +472,10 @@ def assemble(build):
     (rc / 'S99passwall2').symlink_to('../init.d/passwall2')
     (rc / 'K15passwall2').symlink_to('../init.d/passwall2')
     tokens = [line.strip() for line in (ROOT / 'profiles/packages.r2s').read_text().splitlines() if line.strip() and not line.startswith('#')]
-    packages_arg = ' '.join('autocore-arm=' + STATUS['version'] if token == 'autocore-arm' else token
-                            for token in tokens)
+    # ImageBuilder 25.12.6 FormatPackages retains a version selector for later
+    # tokens. Keep PACKAGES unversioned; verify_packages checks our local display
+    # package's exact version before assembly and again in the installed database.
+    packages_arg = ' '.join(tokens)
     manifest_text = run(['make', '-C', ib, 'manifest', 'PROFILE=' + POLICY['profile'], 'PACKAGES=' + packages_arg], capture=True)
     print(manifest_text, flush=True)
     (evidence / 'resolved-manifest.log').write_text(manifest_text)
