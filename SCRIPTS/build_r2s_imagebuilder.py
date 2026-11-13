@@ -20,7 +20,18 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = json.loads((ROOT / 'profiles/r2s-policy.json').read_text())
+STATUS = json.loads((ROOT / 'profiles/r2s-status.json').read_text())
 API = 'https://api.github.com/repos/'
+FORBIDDEN_TUNING_FILES = (
+    'etc/init.d/sys-tuning',
+    'etc/hotplug.d/net/01-maximize_nic_rx_tx_buffers',
+    'etc/hotplug.d/block/01-zram-tuning',
+    'etc/uci-defaults/99-default-settings',
+    'etc/uci-defaults/zzz-default-settings',
+    'etc/sysctl.d/99-zram.conf',
+    'etc/sysctl.d/15-tcp-bbr3.conf',
+    'etc/sysctl.d/15-tcp-bbrplus.conf',
+)
 
 
 def require(ok, message):
@@ -91,9 +102,22 @@ def verify_packages(packages, hard_deps, xray_version, passwall2_version):
     require(not banned, 'Disabled packages returned: ' + ', '.join(sorted(banned)))
     require(packages['xray-core'].startswith(xray_version + '-'), 'Xray package is stale')
     require(packages['luci-app-passwall2'] == passwall2_version, 'Passwall2 package is stale')
+    require(packages['autocore-arm'] == STATUS['version'], 'Display package is not the pinned local build')
     themes = {name for name in packages if name.startswith('luci-theme-')}
     require(themes == {'luci-theme-aurora'}, 'Unexpected LuCI themes: ' + ', '.join(sorted(themes)))
     return sorted(required)
+
+
+def verify_status_sources():
+    source = ROOT / 'profiles/r2s-status'
+    actual = {p.relative_to(source).as_posix() for p in source.rglob('*') if p.is_file()}
+    require(actual == {f['path'] for f in STATUS['files']}, 'Unexpected or missing pinned display source files')
+    for item in STATUS['files']:
+        path = source / item['path']
+        require(not path.is_symlink() and sha(path) == item['sha256'],
+                'Pinned display source changed: ' + item['path'])
+        require(bool(path.stat().st_mode & 0o111) == item['executable'],
+                'Pinned display source permissions changed: ' + item['path'])
 
 
 def verify_autocore_display_only(rootfs):
@@ -119,9 +143,37 @@ def verify_autocore_display_only(rootfs):
     require('getCPUInfo:' in rpc.read_text(), 'autocore CPU display RPC is missing')
     require((rootfs / 'etc/uci-defaults/090-autocore').is_file(),
             'autocore first-boot display setup is missing')
+    files = {}
+    for item in STATUS['files']:
+        path = rootfs / item['path']
+        require(path.is_file() and not path.is_symlink() and sha(path) == item['sha256'],
+                'Pinned display file differs in image: ' + item['path'])
+        require(bool(path.stat().st_mode & 0o111) == item['executable'],
+                'Pinned display file permissions differ: ' + item['path'])
+        files[item['path']] = item['sha256']
+    # The display installer replaces these stock LuCI modules on first boot.
+    # Stop if a LuCI update introduces interfaces our pinned copy does not provide.
+    for original, replacement, pattern in (
+        ('usr/share/rpcd/ucode/luci', 'etc/rpcd_luci', r'^\t(\w+):\s*\{'),
+        ('usr/share/ucode/luci/sys.uc', 'etc/ucode_sys', r'^export function (\w+)\('),
+    ):
+        stock = set(re.findall(pattern, (rootfs / original).read_text(), re.M))
+        custom = set(re.findall(pattern, (rootfs / replacement).read_text(), re.M))
+        require(stock and stock <= custom, 'LuCI interface missing from pinned display: ' + original)
     return {'mode': 'display-only', 'network_tuning': 'disabled',
             'init_sha256': sha(service), 'display_files': present,
+            'files_sha256': files, 'source_commit': STATUS['commit'],
+            'package_version': STATUS['version'],
             'preserves_existing_network_config': True}
+
+
+def verify_no_custom_tuning(rootfs):
+    for name in FORBIDDEN_TUNING_FILES:
+        path = rootfs / name
+        require(not path.exists() and not path.is_symlink(), 'Custom tuning file returned: ' + name)
+    for module in ('tcp_bbr3.ko*', 'tcp_bbrplus.ko*'):
+        require(not list((rootfs / 'lib/modules').rglob(module)), 'Custom congestion module returned: ' + module)
+    return {'forbidden_files': list(FORBIDDEN_TUNING_FILES), 'result': 'absent'}
 
 
 def verify_aurora_ui(rootfs):
@@ -339,6 +391,24 @@ def assemble(build):
     private.chmod(0o600)
     public = ib / 'keys/r2s-build.pub'
     run(['openssl', 'rsa', '-in', private, '-pubout', '-out', public])
+    verify_status_sources()
+    status_root = work / 'status-root'
+    if status_root.exists():
+        shutil.rmtree(status_root)
+    shutil.copytree(ROOT / 'profiles/r2s-status', status_root)
+    service = status_root / 'etc/init.d/autocore'
+    service.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / 'profiles/r2s-overlay/etc/init.d/autocore', service)
+    run(['sudo', 'chown', '-R', '0:0', status_root])
+    status_apk = ib / 'packages' / ('autocore-arm-' + STATUS['version'] + '.apk')
+    run([apk, 'mkpkg', '--sign-key', private, '--files', status_root, '--output', status_apk,
+         '--info', 'name:autocore-arm', '--info', 'version:' + STATUS['version'],
+         '--info', 'arch:aarch64_generic', '--info', 'license:' + STATUS['license'],
+         '--info', 'description:Pinned R2S status display without network tuning',
+         '--info', 'url:https://github.com/QiuSimons/OpenWrt-Add',
+         '--info', 'depends:luci-base', '--info', 'depends:rpcd-mod-ucode'])
+    run([apk, '--keys-dir', ib / 'keys', 'verify', status_apk])
+    provenance['status_display'] = STATUS
     for package in (ib / 'packages').glob('*.apk'):
         meta = package_info(apk, package)
         if meta['name'] in wanted | {'luci-app-passwall2', 'luci-i18n-passwall2-zh-cn'}:
@@ -402,7 +472,8 @@ def assemble(build):
     (rc / 'S99passwall2').symlink_to('../init.d/passwall2')
     (rc / 'K15passwall2').symlink_to('../init.d/passwall2')
     tokens = [line.strip() for line in (ROOT / 'profiles/packages.r2s').read_text().splitlines() if line.strip() and not line.startswith('#')]
-    packages_arg = ' '.join(tokens)
+    packages_arg = ' '.join('autocore-arm=' + STATUS['version'] if token == 'autocore-arm' else token
+                            for token in tokens)
     manifest_text = run(['make', '-C', ib, 'manifest', 'PROFILE=' + POLICY['profile'], 'PACKAGES=' + packages_arg], capture=True)
     print(manifest_text, flush=True)
     (evidence / 'resolved-manifest.log').write_text(manifest_text)
@@ -438,6 +509,7 @@ def assemble(build):
     boot = None
     autocore = None
     aurora = None
+    tuning = None
     for fs, suffix in [('ext4', 'ext4'), ('squashfs', 'sfs')]:
         candidates = list(target.glob('*nanopi-r2s-' + fs + '-sysupgrade.img.gz'))
         require(len(candidates) == 1, 'Missing or ambiguous ' + fs + ' image')
@@ -467,7 +539,11 @@ def assemble(build):
                     actual[d['P']] = d['V']
             require(actual == installed, 'Actual APK database differs from manifest')
             autocore = verify_autocore_display_only(rootfs)
+            tuning = verify_no_custom_tuning(rootfs)
             aurora = verify_aurora_ui(rootfs)
+            for source in ('etc/rpcd_luci', 'etc/ucode_sys'):
+                run(['timeout', '30', 'qemu-aarch64-static', '-L', rootfs, rootfs / 'usr/bin/ucode',
+                     '-c', '-o', work / (Path(source).name + '.ucb'), rootfs / source])
             for driver in ('r8152.ko', 'nft_tproxy.ko', 'nft_socket.ko'):
                 require(list((rootfs / 'lib/modules').rglob(driver)), 'Driver absent from rootfs: ' + driver)
             for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'etc/rc.d/S99passwall2', 'lib/functions/network.sh', 'sbin/sysupgrade'):
@@ -508,7 +584,7 @@ def assemble(build):
               'passwall2_release': passwall2_tag,
               'kernel_policy': provenance['kernel_policy'], 'packages': installed, 'required': required,
               'disabled_count': len(POLICY['disabled']), 'images': images, 'boot': boot,
-              'autocore': autocore, 'aurora': aurora,
+              'autocore': autocore, 'aurora': aurora, 'custom_tuning': tuning,
               'checks': ['Official ImageBuilder checksum', 'Authenticated third-party APKs', 'APK dependency resolution',
                          'Required and disabled package gates', 'Latest Passwall2 release and installed version',
                          'Xray latest release and ARM64 version',
@@ -516,6 +592,8 @@ def assemble(build):
                          'Squashfs all-file extraction', 'Actual APK database', 'Network driver files', 'Lua syntax',
                          'DNSmasq nftset support', 'Xray China GeoIP/GeoSite configuration test under QEMU',
                          'FIT kernel and R2S DTB hashes', 'Boot script CRC', 'Passwall2 startup links',
+                         'Pinned display sources, installed hashes and LuCI interfaces',
+                         'Display ucode syntax under QEMU', 'Custom tuning files and modules excluded',
                          'autocore display retained without network tuning', 'Aurora theme and dashboard files'],
               'hardware_validation': 'not performed'}
     (evidence / 'r2s-verification.json').write_text(json.dumps(report, indent=2) + '\n')

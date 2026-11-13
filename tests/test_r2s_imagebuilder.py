@@ -43,15 +43,72 @@ bootstrap=/luci-static/bootstrap
                 self.assertEqual(result, '/luci-static/aurora|1||')
 
     def prepare_autocore_fixture(self, root):
+        shutil.copytree(ROOT / 'profiles/r2s-status', root, dirs_exist_ok=True)
         script = root / 'etc/init.d/autocore'
         script.parent.mkdir(parents=True)
         shutil.copy2(ROOT / 'profiles/r2s-overlay/etc/init.d/autocore', script)
-        for name in ('rpcd_10_system.js', 'rpcd_29_ports.js', 'rpcd_luci', 'ucode_sys'):
-            (root / 'etc' / name).write_text('getCPUInfo: {}\n')
-        setup = root / 'etc/uci-defaults/090-autocore'
-        setup.parent.mkdir(parents=True)
-        setup.write_text('#!/bin/sh\n')
+        for source, target in (
+            ('etc/rpcd_luci', 'usr/share/rpcd/ucode/luci'),
+            ('etc/ucode_sys', 'usr/share/ucode/luci/sys.uc'),
+        ):
+            dest = root / target
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / source, dest)
         return script
+
+    def test_display_sources_are_pinned_and_tampering_is_rejected(self):
+        ib.verify_status_sources()
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            shutil.copytree(ROOT / 'profiles/r2s-status', root / 'profiles/r2s-status')
+            target = root / 'profiles/r2s-status/etc/rpcd_luci'
+            target.write_text(target.read_text() + '\n// unexpected update\n')
+            with patch.object(ib, 'ROOT', root), self.assertRaisesRegex(RuntimeError, 'Pinned display source changed'):
+                ib.verify_status_sources()
+
+    def test_new_luci_rpc_interface_stops_the_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.prepare_autocore_fixture(root)
+            (root / 'usr/share/rpcd/ucode/luci').write_text('\tnewRequiredMethod: {\n')
+            with self.assertRaisesRegex(RuntimeError, 'LuCI interface missing'):
+                ib.verify_autocore_display_only(root)
+
+    def test_first_boot_display_installer_is_repeatable_and_preserves_network_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.prepare_autocore_fixture(root)
+            network = root / 'etc/config/network'
+            network.parent.mkdir()
+            network.write_text('preserved network settings\n')
+            for name in ('10_system.js', '29_ports.js'):
+                target = root / 'www/luci-static/resources/view/status/include' / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+            installer = (root / 'etc/uci-defaults/090-autocore').read_text()
+            installer = installer.replace("'/", "'" + str(root) + "/")
+            installer = installer.replace('/etc/init.d/rpcd restart', ':')
+            for _ in range(2):
+                subprocess.run(['/bin/sh', '-c', installer], check=True)
+            self.assertEqual(network.read_text(), 'preserved network settings\n')
+            self.assertEqual((root / 'usr/share/rpcd/ucode/luci').read_bytes(),
+                             (ROOT / 'profiles/r2s-status/etc/rpcd_luci').read_bytes())
+
+    def test_tuning_files_and_custom_kernel_modules_cannot_return(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            ib.verify_no_custom_tuning(root)
+            for path in ib.FORBIDDEN_TUNING_FILES:
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('# tuning\n')
+                with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, 'Custom tuning file returned'):
+                    ib.verify_no_custom_tuning(root)
+                target.unlink()
+            module = root / 'lib/modules/6.12.112/tcp_bbr3.ko'
+            module.parent.mkdir(parents=True)
+            module.write_bytes(b'custom module')
+            with self.assertRaisesRegex(RuntimeError, 'Custom congestion module returned'):
+                ib.verify_no_custom_tuning(root)
 
     def test_autocore_retains_display_with_no_network_commands(self):
         with tempfile.TemporaryDirectory() as d:
@@ -76,7 +133,7 @@ bootstrap=/luci-static/bootstrap
             root = Path(d)
             self.prepare_autocore_fixture(root)
             (root / 'etc/rpcd_luci').unlink()
-            with self.assertRaisesRegex(RuntimeError, 'display extension missing'):
+            with self.assertRaisesRegex(RuntimeError, 'display file differs'):
                 ib.verify_autocore_display_only(root)
 
     def test_autocore_nonexecutable_service_stops_build(self):
@@ -101,12 +158,14 @@ bootstrap=/luci-static/bootstrap
 
     def test_actual_apk_hard_dependency_is_required(self):
         packages = {k: '1-r1' for k in ib.POLICY['required']}
+        packages['autocore-arm'] = ib.STATUS['version']
         packages['xray-core'] = '26.10.29-r1'
         with self.assertRaisesRegex(RuntimeError, 'new-hard-dependency'):
             ib.verify_packages(packages, ['new-hard-dependency'], '26.10.29', '1-r1')
 
     def test_all_protected_packages_and_all_forbidden_packages(self):
         base = {k: '1-r1' for k in ib.POLICY['required']}
+        base['autocore-arm'] = ib.STATUS['version']
         base['xray-core'] = '26.10.29-r1'
         ib.verify_packages(base, [], '26.10.29', '1-r1')
         for name in ib.POLICY['required']:
@@ -118,12 +177,14 @@ bootstrap=/luci-static/bootstrap
 
     def test_stale_xray_cannot_pass(self):
         packages = {k: '1-r1' for k in ib.POLICY['required']}
+        packages['autocore-arm'] = ib.STATUS['version']
         packages['xray-core'] = '26.10.21-r1'
         with self.assertRaisesRegex(RuntimeError, 'stale'):
             ib.verify_packages(packages, [], '26.10.29', '1-r1')
 
     def test_feed_cannot_replace_selected_passwall2_or_add_themes(self):
         packages = {k: '1-r1' for k in ib.POLICY['required']}
+        packages['autocore-arm'] = ib.STATUS['version']
         packages['xray-core'] = '26.10.29-r1'
         with self.assertRaisesRegex(RuntimeError, 'Passwall2 package is stale'):
             ib.verify_packages(packages, [], '26.10.29', '26.11.3-r1')

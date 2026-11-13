@@ -1,0 +1,58 @@
+{
+  "repository": "QiuSimons/OpenWrt-Add",
+  "commit": "285881de166563dbcc8fb04d87bde91a8a0a3251",
+  "package": "autocore-arm",
+  "version": "1.0.1-r2",
+  "license": "GPL-3.0-only",
+  "files": [
+    {
+      "source": "apps/autocore-arm/files/generic/090-autocore",
+      "git_blob": "878a6970ffa4027830ac4bb4c78d00ed1eded9c3",
+      "path": "etc/uci-defaults/090-autocore",
+      "executable": true,
+      "sha256": "f2a0201c23324f64cc03a423f4157824f22d386661909cd6091681c56bcea4ea"
+    },
+    {
+      "source": "apps/autocore-arm/files/generic/10_system.js",
+      "git_blob": "41d086d184cd520f779505a98529dca05adef6b8",
+      "path": "etc/rpcd_10_system.js",
+      "executable": false,
+      "sha256": "c519fae1bc90d8fca1840eea9f42e49bfea75c3a2f6a199939af94e057f7d824"
+    },
+    {
+      "source": "apps/autocore-arm/files/generic/29_ports.js",
+      "git_blob": "d3624ae3964fbc17b624df5d8bc24c2595099ff1",
+      "path": "etc/rpcd_29_ports.js",
+      "executable": false,
+      "sha256": "c56613b328ef4e7078656e510f616b82e4176927cf2e41b4c6c9457ad9d55619"
+    },
+    {
+      "source": "apps/autocore-arm/files/generic/35_network_speed.js",
+      "git_blob": "9172289b4bdc63c66ee4bf169c687b2751498e47",
+      "path": "www/luci-static/resources/view/status/include/35_network_speed.js",
+      "executable": false,
+      "sha256": "52b9cf63681f99eb57995bcc67ef291b242866edf1c0765b181c761d78b7eede"
+    },
+    {
+      "source": "apps/autocore-arm/files/generic/luci",
+      "git_blob": "6058746fc2c387aec13647ce7a55ab22cb372c30",
+      "path": "etc/rpcd_luci",
+      "executable": false,
+      "sha256": "3f62f9fcae50d20ea3d5726a7b68f19cc0891c5d4bb53618b9603ba435684cbc"
+    },
+    {
+      "source": "apps/autocore-arm/files/generic/luci-mod-status-autocore.json",
+      "git_blob": "5c542133be4795c95a43a8a6239967e444701b03",
+      "path": "usr/share/rpcd/acl.d/luci-mod-status-autocore.json",
+      "executable": false,
+      "sha256": "5f185d241a94bb9cee19dcc05320d3ca8457f9805765306dfddd19ca93bc6bde"
+    },
+    {
+      "source": "apps/autocore-arm/files/generic/sys.uc",
+      "git_blob": "fa545bde50c872e603efaef65fd719451df39b10",
+      "path": "etc/ucode_sys",
+      "executable": false,
+      "sha256": "cab6baae48c7d367a0dd30d7222b8b355f9b848867d0643aef3ce71f74a7bfdb"
+    }
+  ]
+}

@@ -13,13 +13,22 @@ assert report['commit'] == sys.argv[2], 'Artifact belongs to another source comm
 autocore = report.get('autocore', {})
 assert autocore.get('mode') == 'display-only' and autocore.get('network_tuning') == 'disabled'
 overlay = Path(__file__).resolve().parents[1] / 'profiles/r2s-overlay'
+status = json.loads((overlay.parent / 'r2s-status.json').read_text())
 stub = overlay / 'etc/init.d/autocore'
 assert autocore.get('init_sha256') == hashlib.sha256(stub.read_bytes()).hexdigest(), 'Wrong autocore service in image'
+assert autocore.get('source_commit') == status['commit']
+assert autocore.get('files_sha256') == {f['path']: f['sha256'] for f in status['files']}
+assert autocore.get('package_version') == status['version']
+assert report['custom_tuning']['result'] == 'absent'
 aurora = report['aurora']
 defaults = overlay / 'etc/uci-defaults/30_luci-theme-aurora'
 assert aurora['theme'] == 'aurora'
 assert aurora['defaults_sha256'] == hashlib.sha256(defaults.read_bytes()).hexdigest(), 'Wrong Aurora migration in image'
 packages = report['packages']
+assert packages['autocore-arm'] == status['version']
+policy = json.loads((overlay.parent / 'r2s-policy.json').read_text())
+assert not set(policy['disabled']) & packages.keys(), 'Disabled packages in delivery'
+assert set(policy['required']) <= packages.keys(), 'Required packages missing from delivery'
 assert {name for name in packages if name.startswith('luci-theme-')} == {'luci-theme-aurora'}
 version, revision = report['passwall2_release'].rsplit('-', 1)
 assert packages['luci-app-passwall2'] == f'{version}-r{revision}', 'Wrong Passwall2 version in image'

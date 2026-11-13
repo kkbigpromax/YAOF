@@ -74,7 +74,9 @@ xray-core
 zram-swap
 
 # Exclude unused services and alternate cores.
+-addition-trans-zh
 -arptables-legacy
+-autocore-x86
 -coremark
 -dae
 -ddns-scripts
@@ -98,6 +100,8 @@ zram-swap
 -kmod-backlight-pwm
 -kmod-drm-lima
 -kmod-multimedia-input
+-kmod-tcp-bbr3
+-kmod-tcp-bbrplus
 -kmod-usb-net-ipheth
 -kmod-usb-net-rndis
 -kmod-wireguard
@@ -165,6 +169,7 @@ zram-swap
 -simple-obfs-client
 -sing-box
 -stuntman-client
+-system-addon
 -usbmuxd
 -v2ray-plugin
 -vmlinux-btf
