@@ -543,12 +543,16 @@ def assemble(build):
             autocore = verify_autocore_display_only(rootfs)
             tuning = verify_no_custom_tuning(rootfs)
             aurora = verify_aurora_ui(rootfs)
-            for source in ('etc/rpcd_luci', 'etc/ucode_sys'):
-                # luci.sys exports functions and must compile as a library;
-                # rpcd's luci entry point is a regular program returning methods.
-                mode = '-cmodule' if source == 'etc/ucode_sys' else '-c'
+            # OpenWrt 25.12.6's ucode predates the -cmodule option. Import the
+            # pinned library from a compile-only wrapper so exports are parsed
+            # in module context without executing the library or any service.
+            module = work / 'display-sys.uc'
+            shutil.copy2(rootfs / 'etc/ucode_sys', module)
+            wrapper = work / 'display-sys-check.uc'
+            wrapper.write_text('import * as display_sys from "./display-sys.uc";\n')
+            for source in (rootfs / 'etc/rpcd_luci', wrapper):
                 run(['timeout', '30', 'qemu-aarch64-static', '-L', rootfs, rootfs / 'usr/bin/ucode',
-                     mode, '-o', work / (Path(source).name + '.ucb'), rootfs / source])
+                     '-c', '-o', work / (source.name + '.ucb'), source])
             for driver in ('r8152.ko', 'nft_tproxy.ko', 'nft_socket.ko'):
                 require(list((rootfs / 'lib/modules').rglob(driver)), 'Driver absent from rootfs: ' + driver)
             for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'etc/rc.d/S99passwall2', 'lib/functions/network.sh', 'sbin/sysupgrade'):
