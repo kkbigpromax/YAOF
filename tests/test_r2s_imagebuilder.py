@@ -262,8 +262,6 @@ bootstrap=/luci-static/bootstrap
         self.assertEqual(set(ib.POLICY['seed_exceptions']), {'urngd', 'urandom-seed'})
         self.assertTrue({'urngd', 'urandom-seed'} <= set(ib.POLICY['required']))
         self.assertFalse(set(ib.POLICY['required']) & set(ib.POLICY['disabled']))
-        tokens = {l.strip() for l in (ROOT / 'profiles/packages.r2s').read_text().splitlines() if l and not l.startswith('#')}
-        self.assertEqual(tokens, set(ib.POLICY['required']) | {'-' + x for x in ib.POLICY['disabled']})
 
 
 if __name__ == '__main__':

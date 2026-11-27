@@ -2,8 +2,7 @@
 
 用 **OpenWrt 官方 ImageBuilder** 组装 NanoPi R2S 固件：内核不做修改，只装 Passwall2 + Xray 和必需组件，LuCI 主题用 Outline。
 
-- OpenWrt 版本、目标平台、分区大小和必装包：`profiles/r2s-policy.json`
-- 软件包清单：`profiles/packages.r2s`
+- OpenWrt 版本、目标平台、分区大小、必装包（`required`）和禁装包（`disabled`）：`profiles/r2s-policy.json`
 - 写入固件的文件：`profiles/r2s-overlay/`、`profiles/r2s-status/`
 
 ## 发布

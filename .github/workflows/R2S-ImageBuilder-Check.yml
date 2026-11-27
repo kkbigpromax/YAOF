@@ -6,7 +6,6 @@ on:
     paths:
       - .github/workflows/R2S-ImageBuilder-Check.yml
       - .github/workflows/R2S-ImageBuilder.yml
-      - SCRIPTS/check_r2s_imagebuilder.sh
       - SCRIPTS/build_r2s_imagebuilder.py
       - SCRIPTS/verify_r2s_delivery.py
       - profiles/**
