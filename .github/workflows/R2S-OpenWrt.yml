@@ -1,6 +1,6 @@
 name: R2S-OpenWrt
 
-# Release entry point: run this workflow manually on branch 25.12.
+# Release entry point: run this workflow manually on branch main.
 # No temporary release branch or workflow edit is needed to publish.
 on:
 #  schedule:
