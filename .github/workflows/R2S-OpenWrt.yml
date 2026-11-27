@@ -1,47 +1,42 @@
 name: R2S-OpenWrt
 
+# Release entry point: run this workflow manually on branch 25.12.
+# No temporary release branch or workflow edit is needed to publish.
 on:
 #  schedule:
 #    - cron: 5 6 * * 0
   workflow_dispatch:
     inputs:
+      build_firmware:
+        description: "Build firmware (off = resolve and audit packages only)"
+        required: false
+        type: boolean
+        default: true
+      publish:
+        description: "Publish the verified firmware to the GitHub release"
+        required: false
+        type: boolean
+        default: true
       upload_source:
         description: "Save the official ImageBuilder archive with this build"
         required: false
         type: boolean
         default: false
-      build_firmware:
-        description: "Build and publish firmware"
-        required: false
-        type: boolean
-        default: true
-      badge_status:
-        description: "badge status var（keep empty）"
-        required: false
-        type: string
-        default: ''
   watch:
     types: started
+
+# Releases reuse one tag per OpenWrt version; never let two publishes race.
+concurrency:
+  group: r2s-release
+  cancel-in-progress: false
 
 jobs:
   build:
     permissions:
       contents: write
     uses: ./.github/workflows/R2S-ImageBuilder.yml
-    if: github.event.repository.owner.id == github.event.sender.id && inputs.badge_status == ''
+    if: github.event.repository.owner.id == github.event.sender.id
     with:
+      build_firmware: ${{ github.event_name != 'workflow_dispatch' || inputs.build_firmware }}
+      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
       upload_source: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_source }}
-      build_firmware: ${{ (github.event_name == 'workflow_dispatch' && inputs.build_firmware) || github.event_name != 'workflow_dispatch' }}
-
-  sync_badge:
-    if: inputs.badge_status != ''
-    runs-on: ubuntu-latest
-    steps:
-      - name: Sync badge status
-        run: |
-          echo "Syncing badge status ...( ${{ inputs.badge_status }} )"
-          if [ "${{ inputs.badge_status }}" == "success" ]; then
-            exit 0
-          else
-            exit 1
-          fi
