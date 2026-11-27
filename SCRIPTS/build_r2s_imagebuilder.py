@@ -498,7 +498,7 @@ def assemble(build):
     rc.mkdir(exist_ok=True)
     (rc / 'S99passwall2').symlink_to('../init.d/passwall2')
     (rc / 'K15passwall2').symlink_to('../init.d/passwall2')
-    tokens = [line.strip() for line in (ROOT / 'profiles/packages.r2s').read_text().splitlines() if line.strip() and not line.startswith('#')]
+    tokens = POLICY['required'] + ['-' + name for name in POLICY['disabled']]
     # ImageBuilder 25.12.6 FormatPackages retains a version selector for later
     # tokens. Keep PACKAGES unversioned; verify_packages checks our local display
     # package's exact version before assembly and again in the installed database.
