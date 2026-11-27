@@ -8,7 +8,7 @@
 
 ## 发布
 
-在 GitHub Actions 里，选 `25.12` 分支，手动运行 **R2S-OpenWrt**：
+在 GitHub Actions 里，选 `main` 分支，手动运行 **R2S-OpenWrt**：
 
 | 选项 | 默认 | 作用 |
 | --- | --- | --- |
@@ -24,7 +24,7 @@
 | --- | --- | --- |
 | `R2S-OpenWrt.yml` | 手动运行 / 仓库主人点 Star | 构建并发布 |
 | `R2S-ImageBuilder.yml` | 被其他工作流调用 | 回归测试 → 组装 → 校验 → 发布 → 只保留最近两个版本 |
-| `R2S-ImageBuilder-Check.yml` | 构建相关文件推送到 `25.12` 时 | 只构建、校验，不发布 |
+| `R2S-ImageBuilder-Check.yml` | 构建相关文件推送到 `main` 时 | 只构建、校验，不发布 |
 | `Cleaning.yml` | 每周一 | 清理旧固件、旧 Artifacts 和运行日志 |
 
 ## 本地测试
