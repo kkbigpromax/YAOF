@@ -20,16 +20,21 @@ assert autocore.get('source_commit') == status['commit']
 assert autocore.get('files_sha256') == {f['path']: f['sha256'] for f in status['files']}
 assert autocore.get('package_version') == status['version']
 assert report['custom_tuning']['result'] == 'absent'
-aurora = report['aurora']
-defaults = overlay / 'etc/uci-defaults/30_luci-theme-aurora'
-assert aurora['theme'] == 'aurora'
-assert aurora['defaults_sha256'] == hashlib.sha256(defaults.read_bytes()).hexdigest(), 'Wrong Aurora migration in image'
+outline = report['outline']
+policy = json.loads((overlay.parent / 'r2s-policy.json').read_text())
+assert outline['theme'] == 'outline'
+assert outline['release_sha256'] == policy['outline']['sha256']
+assert outline['package_version'] == policy['outline']['version']
+assert outline['overrides_sha256'] == {
+    name: hashlib.sha256((overlay / name).read_bytes()).hexdigest()
+    for name in ('etc/uci-defaults/30_luci-theme-outline', 'usr/libexec/outline/root-page')
+}, 'Wrong Outline startup overrides in image'
 packages = report['packages']
 assert packages['autocore-arm'] == status['version']
-policy = json.loads((overlay.parent / 'r2s-policy.json').read_text())
+assert packages['luci-theme-outline'] == policy['outline']['version']
 assert not set(policy['disabled']) & packages.keys(), 'Disabled packages in delivery'
 assert set(policy['required']) <= packages.keys(), 'Required packages missing from delivery'
-assert {name for name in packages if name.startswith('luci-theme-')} == {'luci-theme-aurora'}
+assert {name for name in packages if name.startswith('luci-theme-')} == {'luci-theme-outline'}
 version, revision = report['passwall2_release'].rsplit('-', 1)
 assert packages['luci-app-passwall2'] == f'{version}-r{revision}', 'Wrong Passwall2 version in image'
 assert len(report['images']) == 2

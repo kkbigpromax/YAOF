@@ -1,0 +1,3 @@
+#!/bin/sh
+# Keep the existing Nginx entry point. Upstream's helper is specific to uhttpd.
+exit 0

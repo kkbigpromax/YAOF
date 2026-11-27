@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 import zlib
@@ -16,31 +17,49 @@ spec.loader.exec_module(ib)
 
 
 class ImageBuilderTests(unittest.TestCase):
-    def test_aurora_replaces_retained_vantage_and_bootstrap(self):
-        script = ROOT / 'profiles/r2s-overlay/etc/uci-defaults/30_luci-theme-aurora'
+    def test_outline_switches_theme_and_disables_only_its_own_cron_entry(self):
+        script = ROOT / 'profiles/r2s-overlay/etc/uci-defaults/30_luci-theme-outline'
         uci = """
 uci() {
     shift
     case "$1:$2" in
         set:luci.main.mediaurlbase=*) media=${2#*=};;
-        set:luci.themes.Aurora=/luci-static/aurora) registered=1;;
+        set:luci.themes.Outline=/luci-static/outline) registered=1;;
+        delete:luci.themes.Aurora) aurora=;;
         delete:luci.themes.Vantage) vantage=;;
         delete:luci.themes.Bootstrap) bootstrap=;;
-        commit:luci) printf '%s|%s|%s|%s' "$media" "$registered" "$vantage" "$bootstrap";;
+        commit:luci) printf '%s|%s|%s|%s|%s' "$media" "$registered" "$aurora" "$vantage" "$bootstrap";;
+        get:outline.*) return 1;;
+        set:outline.updates.auto=0) auto=0;;
+        set:outline.*) return 0;;
+        commit:outline) printf '|%s' "$auto";;
         *) return 99;;
     esac
 }
 media=$2
+aurora=/luci-static/aurora
 vantage=/luci-static/vantage
 bootstrap=/luci-static/bootstrap
 . "$1"
 """
         for previous in ('', '/luci-static/aurora', '/luci-static/bootstrap', '/luci-static/vantage'):
-            with self.subTest(previous=previous):
-                result = subprocess.check_output(
-                    ['/bin/sh', '-c', uci, 'sh', str(script), previous],
-                    text=True)
-                self.assertEqual(result, '/luci-static/aurora|1||')
+            with self.subTest(previous=previous), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                for subdir in ('etc/config', 'etc/crontabs', 'www/luci-static'):
+                    (root / subdir).mkdir(parents=True)
+                cron = root / 'etc/crontabs/root'
+                cron.write_text('0 4 * * 0 /usr/libexec/outline/job auto >/dev/null 2>&1\n'
+                                '0 5 * * * /usr/bin/example\n')
+                staged = root / 'defaults.sh'
+                staged.write_text(script.read_text().replace('/etc/config/', str(root / 'etc/config') + '/')
+                                  .replace('/etc/crontabs/', str(root / 'etc/crontabs') + '/')
+                                  .replace('/www/', str(root / 'www') + '/'))
+                # BSD sed and the router's BusyBox sed use different -i syntax.
+                if sys.platform == 'darwin':
+                    staged.write_text(staged.read_text().replace("sed -i ", "sed -i '' "))
+                result = subprocess.check_output(['/bin/sh', '-c', uci, 'sh', str(staged), previous], text=True)
+                self.assertEqual(result, '/luci-static/outline|1||||0')
+                self.assertEqual(cron.read_text(), '0 5 * * * /usr/bin/example\n')
 
     def prepare_autocore_fixture(self, root):
         shutil.copytree(ROOT / 'profiles/r2s-status', root, dirs_exist_ok=True)
@@ -159,6 +178,7 @@ bootstrap=/luci-static/bootstrap
     def test_actual_apk_hard_dependency_is_required(self):
         packages = {k: '1-r1' for k in ib.POLICY['required']}
         packages['autocore-arm'] = ib.STATUS['version']
+        packages['luci-theme-outline'] = ib.OUTLINE['version']
         packages['xray-core'] = '26.10.29-r1'
         with self.assertRaisesRegex(RuntimeError, 'new-hard-dependency'):
             ib.verify_packages(packages, ['new-hard-dependency'], '26.10.29', '1-r1')
@@ -166,6 +186,7 @@ bootstrap=/luci-static/bootstrap
     def test_all_protected_packages_and_all_forbidden_packages(self):
         base = {k: '1-r1' for k in ib.POLICY['required']}
         base['autocore-arm'] = ib.STATUS['version']
+        base['luci-theme-outline'] = ib.OUTLINE['version']
         base['xray-core'] = '26.10.29-r1'
         ib.verify_packages(base, [], '26.10.29', '1-r1')
         for name in ib.POLICY['required']:
@@ -178,6 +199,7 @@ bootstrap=/luci-static/bootstrap
     def test_stale_xray_cannot_pass(self):
         packages = {k: '1-r1' for k in ib.POLICY['required']}
         packages['autocore-arm'] = ib.STATUS['version']
+        packages['luci-theme-outline'] = ib.OUTLINE['version']
         packages['xray-core'] = '26.10.21-r1'
         with self.assertRaisesRegex(RuntimeError, 'stale'):
             ib.verify_packages(packages, [], '26.10.29', '1-r1')
@@ -185,11 +207,14 @@ bootstrap=/luci-static/bootstrap
     def test_feed_cannot_replace_selected_passwall2_or_add_themes(self):
         packages = {k: '1-r1' for k in ib.POLICY['required']}
         packages['autocore-arm'] = ib.STATUS['version']
+        packages['luci-theme-outline'] = ib.OUTLINE['version']
         packages['xray-core'] = '26.10.29-r1'
         with self.assertRaisesRegex(RuntimeError, 'Passwall2 package is stale'):
             ib.verify_packages(packages, [], '26.10.29', '26.11.3-r1')
         with self.assertRaisesRegex(RuntimeError, 'Unexpected LuCI themes'):
             ib.verify_packages({**packages, 'luci-theme-extra': '1-r1'}, [], '26.10.29', '1-r1')
+        with self.assertRaisesRegex(RuntimeError, 'Outline package is not the pinned build'):
+            ib.verify_packages({**packages, 'luci-theme-outline': '0-r1'}, [], '26.10.29', '1-r1')
 
     def test_manifest_parsing_ignores_build_output(self):
         self.assertEqual(ib.parse_manifest('make: downloading packages\nxray-core - 26.10.29-r1\n'), {'xray-core': '26.10.29-r1'})

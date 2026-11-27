@@ -1,0 +1,21 @@
+#!/bin/sh
+# Switch fresh installs and retained LuCI configurations to the single bundled theme.
+uci -q set luci.themes.Outline=/luci-static/outline || exit 1
+uci -q set luci.main.mediaurlbase=/luci-static/outline || exit 1
+for theme in Aurora Vantage Bootstrap; do
+    uci -q delete "luci.themes.$theme" || true
+done
+uci -q commit luci || exit 1
+
+# Replace the publisher's default weekly updater with a disabled setting.
+[ -f /etc/config/outline ] || touch /etc/config/outline || exit 1
+for section in appearance:appearance light:theme dark:theme branding:branding updates:updates; do
+    uci -q get "outline.${section%%:*}" >/dev/null ||
+        uci -q set "outline.${section%%:*}=${section#*:}" || exit 1
+done
+uci -q set outline.updates.auto=0 || exit 1
+uci -q commit outline || exit 1
+if [ -f /etc/crontabs/root ]; then
+    sed -i '\#/usr/libexec/outline/job auto#d' /etc/crontabs/root || exit 1
+fi
+mkdir -p /www/luci-static/outline-brand

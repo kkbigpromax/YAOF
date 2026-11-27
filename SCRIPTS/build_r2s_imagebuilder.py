@@ -21,6 +21,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = json.loads((ROOT / 'profiles/r2s-policy.json').read_text())
 STATUS = json.loads((ROOT / 'profiles/r2s-status.json').read_text())
+OUTLINE = POLICY['outline']
 API = 'https://api.github.com/repos/'
 FORBIDDEN_TUNING_FILES = (
     'etc/init.d/sys-tuning',
@@ -49,6 +50,9 @@ def sha(path):
 
 def get(url, dest=None):
     req = Request(url, headers={'User-Agent': 'YAOF-R2S-ImageBuilder', 'Accept': 'application/vnd.github+json' if url.startswith(API) else '*/*'})
+    token = os.environ.get('GITHUB_TOKEN')
+    if token and url.startswith(API):
+        req.add_unredirected_header('Authorization', 'Bearer ' + token)
     with urlopen(req, timeout=120) as response:
         if dest is None:
             return response.read()
@@ -104,7 +108,8 @@ def verify_packages(packages, hard_deps, xray_version, passwall2_version):
     require(packages['luci-app-passwall2'] == passwall2_version, 'Passwall2 package is stale')
     require(packages['autocore-arm'] == STATUS['version'], 'Display package is not the pinned local build')
     themes = {name for name in packages if name.startswith('luci-theme-')}
-    require(themes == {'luci-theme-aurora'}, 'Unexpected LuCI themes: ' + ', '.join(sorted(themes)))
+    require(themes == {'luci-theme-outline'}, 'Unexpected LuCI themes: ' + ', '.join(sorted(themes)))
+    require(packages['luci-theme-outline'] == OUTLINE['version'], 'Outline package is not the pinned build')
     return sorted(required)
 
 
@@ -176,21 +181,32 @@ def verify_no_custom_tuning(rootfs):
     return {'forbidden_files': list(FORBIDDEN_TUNING_FILES), 'result': 'absent'}
 
 
-def verify_aurora_ui(rootfs):
-    defaults_path = 'etc/uci-defaults/30_luci-theme-aurora'
-    defaults = rootfs / defaults_path
-    expected = ROOT / 'profiles/r2s-overlay' / defaults_path
-    require(defaults.is_file() and sha(defaults) == sha(expected) and defaults.stat().st_mode & 0o111,
-            'Aurora first-boot theme migration is missing or changed')
+def verify_outline_ui(rootfs):
+    files = {}
+    for name in ('etc/uci-defaults/30_luci-theme-outline', 'usr/libexec/outline/root-page'):
+        path = rootfs / name
+        expected = ROOT / 'profiles/r2s-overlay' / name
+        require(path.is_file() and not path.is_symlink() and path.stat().st_mode & 0o111
+                and sha(path) == sha(expected), 'Outline startup override differs: ' + name)
+        files[name] = sha(path)
     paths = [
-        'usr/share/ucode/luci/template/themes/aurora/header.ut',
-        'usr/share/ucode/luci/template/themes/aurora/sysauth.ut',
-        'www/luci-static/aurora/main.css',
+        'usr/share/ucode/luci/template/themes/outline/header.ut',
+        'usr/share/ucode/luci/template/themes/outline/sysauth.ut',
+        'usr/share/ucode/luci/template/themes/outline/footer.ut',
+        'www/luci-static/outline/main.css',
+        'www/luci-static/outline/login.css',
+        'usr/share/rpcd/ucode/luci.outline',
         'www/luci-static/resources/view/dashboard/index.js',
     ]
-    for path in paths:
-        require((rootfs / path).is_file(), 'Aurora UI file missing: ' + path)
-    return {'theme': 'aurora', 'defaults_sha256': sha(defaults)}
+    for name in paths:
+        require((rootfs / name).is_file(), 'Outline UI file missing: ' + name)
+    require(not (rootfs / 'www/luci-static/aurora').exists(), 'Aurora files returned')
+    cron = rootfs / 'etc/crontabs/root'
+    require(not cron.is_file() or '/usr/libexec/outline/job auto' not in cron.read_text(),
+            'Outline automatic updater scheduled in image')
+    return {'theme': 'outline', 'package_version': OUTLINE['version'],
+            'release_sha256': OUTLINE['sha256'], 'overrides_sha256': files}
+
 
 
 def inflate(image, raw):
@@ -385,6 +401,17 @@ def assemble(build):
         require(isinstance(dep, str) and re.fullmatch(r'[A-Za-z0-9_.+-]+', dep), 'Passwall2 dependency syntax changed: ' + str(dep))
         hard_deps.append(dep)
     provenance['passwall2_metadata'] = info
+    theme_release = json.loads(get(API + 'tickcount/luci-theme-outline/releases/tags/' + OUTLINE['tag']))
+    require(not theme_release['draft'] and theme_release['tag_name'] == OUTLINE['tag'],
+            'Unexpected Outline release')
+    theme = fetch_asset(theme_release, f"luci-theme-outline-{OUTLINE['version']}.apk", downloads)
+    require(sha(theme) == OUTLINE['sha256'], 'Pinned Outline asset checksum changed')
+    theme_meta = package_info(apk, theme)
+    require(theme_meta['name'] == 'luci-theme-outline' and theme_meta['version'] == OUTLINE['version'],
+            'Outline APK identity differs from pin')
+    shutil.copy2(theme, ib / 'packages' / theme.name)
+    provenance['outline'] = {**OUTLINE, 'metadata': theme_meta}
+
     # Generate a local build key; never upload its private half or put it in the image.
     private = work / 'build-key.pem'
     run(['openssl', 'genrsa', '-out', private, '2048'])
@@ -411,7 +438,7 @@ def assemble(build):
     provenance['status_display'] = STATUS
     for package in (ib / 'packages').glob('*.apk'):
         meta = package_info(apk, package)
-        if meta['name'] in wanted | {'luci-app-passwall2', 'luci-i18n-passwall2-zh-cn'}:
+        if meta['name'] in wanted | {'luci-app-passwall2', 'luci-i18n-passwall2-zh-cn', 'luci-theme-outline'}:
             # Publisher APKs were already authenticated by the Release SHA256.
             # Only this signature conversion accepts their unavailable original key;
             # the resulting signature and ImageBuilder package checks remain strict.
@@ -445,7 +472,7 @@ def assemble(build):
     provenance['xray'] = {'tag': xrelease['tag_name'], 'prerelease': xrelease['prerelease'],
                           'published_at': xrelease['published_at'], 'archive_sha256': sha(xb),
                           'binary_sha256': sha(binary), 'version_output': output.strip()}
-    # Only theme/status user-space packages use the upstream signed feed.
+    # The dashboard and other selected user-space packages use the signed feed.
     key = ib / 'keys/custom-feed.rsa.pub'
     get('https://qiusimons.github.io/OpenWrt-Add/keys/custom-feed.rsa.pub', key)
     repo = 'https://qiusimons.github.io/OpenWrt-Add/aarch64_generic/packages.adb'
@@ -510,7 +537,7 @@ def assemble(build):
     images = []
     boot = None
     autocore = None
-    aurora = None
+    outline = None
     tuning = None
     for fs, suffix in [('ext4', 'ext4'), ('squashfs', 'sfs')]:
         candidates = list(target.glob('*nanopi-r2s-' + fs + '-sysupgrade.img.gz'))
@@ -542,7 +569,7 @@ def assemble(build):
             require(actual == installed, 'Actual APK database differs from manifest')
             autocore = verify_autocore_display_only(rootfs)
             tuning = verify_no_custom_tuning(rootfs)
-            aurora = verify_aurora_ui(rootfs)
+            outline = verify_outline_ui(rootfs)
             # OpenWrt 25.12.6's ucode predates the -cmodule option. Import the
             # pinned library from a compile-only wrapper so exports are parsed
             # in module context without executing the library or any service.
@@ -553,6 +580,10 @@ def assemble(build):
             for source in (rootfs / 'etc/rpcd_luci', wrapper):
                 run(['timeout', '30', 'qemu-aarch64-static', '-L', rootfs, rootfs / 'usr/bin/ucode',
                      '-c', '-o', work / (source.name + '.ucb'), source])
+            templates = rootfs / 'usr/share/ucode/luci/template/themes/outline'
+            for path in sorted(templates.glob('*.ut')):
+                run(['timeout', '30', 'qemu-aarch64-static', '-L', rootfs, rootfs / 'usr/bin/ucode',
+                     '-T', '-c', '-o', work / (path.name + '.ucb'), path])
             for driver in ('r8152.ko', 'nft_tproxy.ko', 'nft_socket.ko'):
                 require(list((rootfs / 'lib/modules').rglob(driver)), 'Driver absent from rootfs: ' + driver)
             for path in ('sbin/init', 'sbin/procd', 'sbin/fw4', 'usr/sbin/nginx', 'usr/bin/chinadns-ng', 'etc/init.d/passwall2', 'etc/rc.d/S99passwall2', 'lib/functions/network.sh', 'sbin/sysupgrade'):
@@ -593,7 +624,7 @@ def assemble(build):
               'passwall2_release': passwall2_tag,
               'kernel_policy': provenance['kernel_policy'], 'packages': installed, 'required': required,
               'disabled_count': len(POLICY['disabled']), 'images': images, 'boot': boot,
-              'autocore': autocore, 'aurora': aurora, 'custom_tuning': tuning,
+              'autocore': autocore, 'outline': outline, 'custom_tuning': tuning,
               'checks': ['Official ImageBuilder checksum', 'Authenticated third-party APKs', 'APK dependency resolution',
                          'Required and disabled package gates', 'Latest Passwall2 release and installed version',
                          'Xray latest release and ARM64 version',
@@ -603,7 +634,7 @@ def assemble(build):
                          'FIT kernel and R2S DTB hashes', 'Boot script CRC', 'Passwall2 startup links',
                          'Pinned display sources, installed hashes and LuCI interfaces',
                          'Display ucode syntax under QEMU', 'Custom tuning files and modules excluded',
-                         'autocore display retained without network tuning', 'Aurora theme and dashboard files'],
+                         'autocore display retained without network tuning', 'Outline theme, dashboard files and first-boot settings'],
               'hardware_validation': 'not performed'}
     (evidence / 'r2s-verification.json').write_text(json.dumps(report, indent=2) + '\n')
     print('R2S_VERIFICATION_JSON=' + json.dumps(report, separators=(',', ':')), flush=True)

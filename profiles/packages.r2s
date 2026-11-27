@@ -36,7 +36,6 @@ kmod-usb-net-rtl8152
 libc
 libuci-lua
 lua
-luci-app-aurora-config
 luci-app-firewall
 luci-app-package-manager
 luci-app-passwall2
@@ -49,7 +48,7 @@ luci-mod-admin-full
 luci-mod-dashboard
 luci-proto-ipv6
 luci-proto-ppp
-luci-theme-aurora
+luci-theme-outline
 lyaml
 netifd
 nftables-json
@@ -138,12 +137,14 @@ zram-swap
 -luci-app-unblockneteasemusic
 -luci-app-upnp
 -luci-app-usb-printer
+-luci-app-aurora-config
 -luci-app-vantage
 -luci-app-vlmcsd
 -luci-app-watchcat
 -luci-app-wechatpush
 -luci-app-xlnetacc
 -luci-app-zerotier
+-luci-i18n-aurora-config-zh-cn
 -luci-i18n-mosdns-zh-cn
 -luci-i18n-passwall-zh-cn
 -luci-i18n-upnp-zh-cn
@@ -151,6 +152,7 @@ zram-swap
 -luci-i18n-vantage-zh-cn
 -luci-nginx
 -luci-proto-wireguard
+-luci-theme-aurora
 -luci-theme-bootstrap
 -luci-theme-vantage
 -microsocks
